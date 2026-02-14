@@ -1,41 +1,104 @@
 {
   "id": "novel-creator",
-  "name": "小说创作大师",
-  "description": "完整的小说创作工作流系统，集成文件级长期记忆（Smart State模式），支持百万字级长篇小说。通过三核心文件+五追踪器+滚动压缩摘要+风格锚点，确保第200万字仍记得第1章的内容。",
-  "version": "5.1.0",
+  "name": "小说创作大师（跨工具兼容版）",
+  "description": "支持 Codex / Claude Code / OpenCode / Gemini CLI / Antigravity 的跨工具小说创作技能，含低上下文写作与强制章节门禁（更新记忆→一致性检查→风格校准→校稿→门禁检查）。",
+  "version": "6.3.0",
   "features": [
-    "拆书分析", "仿写学习", "知识库构建", "内容生成",
-    "校稿编辑", "去AI化", "文件级长期记忆", "Smart State模式",
-    "滚动压缩摘要", "一致性审计", "伏笔追踪", "会话恢复",
-    "风格锚点", "对话画像", "情感节奏追踪", "批量写作",
-    "章节修订", "章末钩子追踪", "风格校准"
+    "Smart State模式",
+    "一致性审计",
+    "仿写学习",
+    "伏笔追踪",
+    "会话恢复",
+    "低上下文预算",
+    "内容生成",
+    "去AI化",
+    "多工具入口适配",
+    "对话画像",
+    "强制章节门禁",
+    "情感节奏追踪",
+    "批量写作",
+    "拆书分析",
+    "文件级长期记忆",
+    "校稿编辑",
+    "模糊想法开书",
+    "滚动压缩摘要",
+    "百万字路线图",
+    "知识库构建",
+    "硬门禁校验脚本",
+    "章末钩子追踪",
+    "章节修订",
+    "脚本化风格提取",
+    "跨工具一键安装",
+    "跨项目风格库",
+    "门禁产物规范",
+    "题材风格引导",
+    "风格校准",
+    "风格迁移",
+    "风格锚点"
   ],
-
   "activation": {
     "patterns": [
-      "拆书", "仿写", "小说创作", "生成大纲", "生成人设",
-      "世界观构建", "金手指设计", "黄金开篇", "小说知识库",
-      "/novel-create", "/novel-analyze", "/拆书", "/仿写",
-      "/建库", "/写作", "/续写", "/批量写作", "/修改章节",
-      "/更新记忆", "/检查一致性", "/检索记忆", "/伏笔状态",
-      "/角色状态", "/时间线", "/风格校准", "/校稿", "/完整流程"
+      "/novel-analyze",
+      "/novel-create",
+      "/仿写",
+      "/伏笔状态",
+      "/修改章节",
+      "/写作",
+      "/写全篇",
+      "/完整流程",
+      "/建库",
+      "/批量写作",
+      "/拆书",
+      "/时间线",
+      "/更新记忆",
+      "/校稿",
+      "/检查一致性",
+      "/检索记忆",
+      "/续写",
+      "/角色状态",
+      "/门禁检查",
+      "/题材选风格",
+      "/风格库检索",
+      "/风格提取",
+      "/风格校准",
+      "/风格迁移",
+      "antigravity",
+      "claude code",
+      "gemini cli",
+      "opencode",
+      "世界观构建",
+      "仿写",
+      "小说创作",
+      "小说知识库",
+      "拆书",
+      "模糊剧情思路",
+      "生成人设",
+      "生成大纲",
+      "百万字小说",
+      "跨工具安装",
+      "金手指设计",
+      "黄金开篇"
     ],
     "triggers": [
-      "用户要求拆解小说",
+      "用户只有模糊剧情思路",
+      "用户希望按题材选择风格",
+      "用户提供样章并要求模仿风格",
       "用户要求仿写小说",
-      "用户需要生成小说元素",
-      "用户需要构建小说知识库",
-      "用户需要创作小说",
-      "用户需要继续写作（续写）",
-      "用户需要批量写作多章",
+      "用户要求拆解小说",
+      "用户要求跨项目复用风格",
       "用户需要修改已写章节",
+      "用户需要创作小说",
+      "用户需要批量写作多章",
       "用户需要更新记忆",
+      "用户需要构建小说知识库",
+      "用户需要查看伏笔/角色/时间线状态",
       "用户需要检查一致性",
+      "用户需要生成小说元素",
+      "用户需要继续写作（续写）",
       "用户需要风格校准",
-      "用户需要查看伏笔/角色/时间线状态"
+      "用户需要验证章节是否达到发布标准"
     ]
   },
-
   "memory_system": {
     "name": "文件级长期记忆系统（Smart State模式）",
     "principle": "上下文窗口=内存（易失）；文件系统=磁盘（持久）",
@@ -43,9 +106,17 @@
     "smart_state": {
       "description": "novel_state.md 为唯一必读状态文件，内含各追踪器关键摘要",
       "benefit": "Pre-Write仅需读取2个文件（plan+state），减少70%读取量",
-      "content_includes": ["进度", "活跃剧情线", "活跃人物摘要", "待回收伏笔", "最近5章摘要", "情感节奏快照", "风格提醒", "下一章预告"]
+      "content_includes": [
+        "进度",
+        "活跃剧情线",
+        "活跃人物摘要",
+        "待回收伏笔",
+        "最近5章摘要",
+        "情感节奏快照",
+        "风格提醒",
+        "下一章预告"
+      ]
     },
-
     "core_files": {
       "novel_plan": {
         "path": "00_memory/novel_plan.md",
@@ -57,7 +128,16 @@
         "path": "00_memory/novel_state.md",
         "role": "Smart State 核心状态文件（唯一必读状态）",
         "access": "写前必读，写后必更新（全量）",
-        "content": ["进度", "活跃剧情线", "活跃人物摘要", "待回收伏笔", "最近5章摘要", "情感节奏快照", "风格提醒", "下一章预告"]
+        "content": [
+          "进度",
+          "活跃剧情线",
+          "活跃人物摘要",
+          "待回收伏笔",
+          "最近5章摘要",
+          "情感节奏快照",
+          "风格提醒",
+          "下一章预告"
+        ]
       },
       "novel_findings": {
         "path": "00_memory/novel_findings.md",
@@ -65,7 +145,6 @@
         "access": "会话恢复时读取，发现问题时写入"
       }
     },
-
     "trackers": {
       "character_tracker": {
         "path": "00_memory/character_tracker.md",
@@ -93,7 +172,6 @@
         "access": "按需读取（重要场景时）；每10章强制校准"
       }
     },
-
     "chapter_summaries": {
       "path": "00_memory/chapter_summaries/",
       "compression_strategy": "滚动压缩",
@@ -119,45 +197,126 @@
         "every_10_chapters": "recent.md最早章节压缩为L2移入mid_term.md",
         "every_50_chapters": "mid_term.md最早40章压缩为L3卷级总结移入archive/"
       }
+    },
+    "longform_planning": {
+      "idea_seed": "00_memory/idea_seed.md",
+      "million_word_blueprint": "00_memory/million_word_blueprint.md",
+      "sprint_cycle": "每10章一次冲刺计划与复盘"
+    },
+    "style_library": {
+      "global_path": "$CODEX_HOME/skills/novel-creator-skill/assets/style_library/",
+      "index": "index.md",
+      "project_profile_path": "00_memory/style_profiles/",
+      "knowledge_base_file": "02_knowledge_base/12_style_skills.md"
+    },
+    "token_budget_policy": {
+      "default_prewrite_reads": [
+        "00_memory/novel_plan.md",
+        "00_memory/novel_state.md"
+      ],
+      "max_files_per_chapter": 4,
+      "strategy": "默认最小读取，按需扩展，禁止全量加载",
+      "deep_calibration_every_n_chapters": 10
+    },
+    "gate_artifacts": {
+      "path": "04_editing/gate_artifacts/<chapter_id>/",
+      "required_files": [
+        "memory_update.md",
+        "consistency_report.md",
+        "style_calibration.md",
+        "copyedit_report.md",
+        "publish_ready.md",
+        "gate_result.json"
+      ],
+      "verification_script": "scripts/chapter_gate_check.py"
     }
   },
-
   "hooks": {
     "pre_write": {
       "name": "Pre-Write Protocol (Smart State)",
       "trigger": "每次写新章节之前",
       "mandatory": true,
       "mandatory_reads": [
-        {"action": "Read novel_plan.md", "purpose": "确认主线方向"},
-        {"action": "Read novel_state.md", "purpose": "Smart State一站式状态"}
+        {
+          "action": "Read novel_plan.md",
+          "purpose": "确认主线方向"
+        },
+        {
+          "action": "Read novel_state.md",
+          "purpose": "Smart State一站式状态"
+        }
       ],
       "on_demand_reads": [
-        {"condition": "涉及复杂角色互动", "action": "Read character_tracker.md"},
-        {"condition": "涉及时间跳跃", "action": "Read timeline.md"},
-        {"condition": "需回收伏笔", "action": "Read foreshadowing_tracker.md"},
-        {"condition": "涉及新地点/势力", "action": "Read world_state.md"},
-        {"condition": "重要战斗/情感场景", "action": "Read style_anchor.md"},
-        {"condition": "需要更多上下文", "action": "Read chapter_summaries/recent.md"},
-        {"condition": "涉及具体设定", "action": "Read 知识库相关文件"}
+        {
+          "condition": "涉及复杂角色互动",
+          "action": "Read character_tracker.md"
+        },
+        {
+          "condition": "涉及时间跳跃",
+          "action": "Read timeline.md"
+        },
+        {
+          "condition": "需回收伏笔",
+          "action": "Read foreshadowing_tracker.md"
+        },
+        {
+          "condition": "涉及新地点/势力",
+          "action": "Read world_state.md"
+        },
+        {
+          "condition": "重要战斗/情感场景",
+          "action": "Read style_anchor.md"
+        },
+        {
+          "condition": "需要更多上下文",
+          "action": "Read chapter_summaries/recent.md"
+        },
+        {
+          "condition": "涉及具体设定",
+          "action": "Read 知识库相关文件"
+        }
       ],
       "output": "写前检查清单（进度/计划/人物/伏笔/节奏/章末钩子/一致性）"
     },
-
     "post_write": {
       "name": "Post-Write Protocol",
       "trigger": "每章写完之后",
       "mandatory": true,
       "steps": [
-        {"order": 1, "action": "提取本章核心记忆", "purpose": "结构化摘要"},
-        {"order": 2, "action": "全量更新 novel_state.md", "purpose": "Smart State推进"},
-        {"order": 3, "action": "更新受影响的追踪器", "purpose": "按需更新", "parallel": true},
-        {"order": 4, "action": "追加 chapter_summaries/recent.md", "purpose": "L1摘要"},
-        {"order": 5, "action": "一致性检查", "purpose": "记录到findings.md"},
-        {"order": 6, "action": "更新 novel_plan.md checkbox", "purpose": "进度追踪"}
+        {
+          "order": 1,
+          "action": "执行 /更新记忆",
+          "purpose": "增量更新状态、追踪器与章节摘要"
+        },
+        {
+          "order": 2,
+          "action": "执行 /检查一致性",
+          "purpose": "识别剧情/设定/角色冲突并记录"
+        },
+        {
+          "order": 3,
+          "action": "执行 /风格校准",
+          "purpose": "逐章校正风格偏移"
+        },
+        {
+          "order": 4,
+          "action": "执行 /校稿",
+          "purpose": "去AI味润色并输出可发布稿"
+        },
+        {
+          "order": 5,
+          "action": "执行 /门禁检查",
+          "purpose": "脚本硬校验门禁产物与发布状态",
+          "mandatory_gate": true
+        },
+        {
+          "order": 6,
+          "action": "更新 novel_plan.md checkbox",
+          "purpose": "进度追踪"
+        }
       ],
-      "output": "写后更新报告（字数/章末钩子/情感基调/伏笔/一致性）"
+      "output": "写后更新报告（一致性/风格/去AI/门禁校验结果）"
     },
-
     "two_chapter_rule": {
       "name": "2-Chapter Rule",
       "trigger": "每写完2章",
@@ -171,7 +330,6 @@
       ],
       "output": "审计报告 → novel_findings.md"
     },
-
     "session_recovery": {
       "name": "Session Recovery",
       "trigger": "/续写 或新会话检测到记忆文件",
@@ -182,10 +340,9 @@
       ],
       "output": "恢复报告（小说名/进度/上章摘要/待回收伏笔/注意事项）"
     },
-
     "style_calibration": {
       "name": "Style Calibration",
-      "trigger": "每写完10章 或 /风格校准",
+      "trigger": "每章写完后（强制）或 /风格校准（每10章做一次深度校准）",
       "steps": [
         "对比最近10章与style_anchor.md风格DNA",
         "检查禁忌清单违规",
@@ -193,9 +350,50 @@
         "检查情感节奏是否平衡"
       ],
       "output": "风格校准报告"
+    },
+    "idea_to_epic": {
+      "name": "Idea-to-Epic Protocol",
+      "trigger": "/写全篇",
+      "mandatory": true,
+      "steps": [
+        "创建 idea_seed.md",
+        "创建 million_word_blueprint.md",
+        "生成卷级与章级里程碑",
+        "初始化 novel_state.md",
+        "拆分10章冲刺",
+        "输出风险与验收标准"
+      ],
+      "output": "开书路线图（可直接进入写作迭代）"
+    },
+    "style_extraction": {
+      "name": "Style Extraction Protocol",
+      "trigger": "/风格提取",
+      "mandatory": true,
+      "steps": [
+        "运行 scripts/style_fingerprint.py",
+        "生成项目风格档案",
+        "更新 style_anchor.md",
+        "更新 12_style_skills.md",
+        "更新全局 style_library/index.md"
+      ],
+      "output": "可跨项目复用的风格技能"
+    },
+    "gate_verification": {
+      "name": "Gate Verification Protocol",
+      "trigger": "每章校稿后（强制）或 /门禁检查",
+      "mandatory": true,
+      "script": "scripts/chapter_gate_check.py",
+      "command": "python3 scripts/chapter_gate_check.py --project-root <项目目录> --chapter-file <章节文件>",
+      "required_artifacts": [
+        "memory_update.md",
+        "consistency_report.md",
+        "style_calibration.md",
+        "copyedit_report.md",
+        "publish_ready.md"
+      ],
+      "output": "gate_result.json"
     }
   },
-
   "consistency_engine": {
     "name": "一致性检测引擎",
     "dimensions": {
@@ -234,7 +432,6 @@
       ]
     }
   },
-
   "modules": {
     "analyzer": {
       "name": "拆书分析器",
@@ -266,35 +463,55 @@
       "name": "内容生成器",
       "command": "/写作",
       "description": "生成章节，执行Smart State Pre/Post-Write Protocol",
-      "protocol": ["pre_write", "generate", "post_write"]
+      "protocol": [
+        "pre_write",
+        "generate",
+        "post_write"
+      ]
     },
     "resume": {
       "name": "续写恢复器",
       "command": "/续写",
       "description": "会话恢复+继续写下一章",
-      "protocol": ["session_recovery", "pre_write", "generate", "post_write"]
+      "protocol": [
+        "session_recovery",
+        "pre_write",
+        "generate",
+        "post_write"
+      ]
     },
     "batch_writer": {
       "name": "批量写作器",
       "command": "/批量写作",
       "description": "连续生成多章，自动循环Pre-Write→生成→Post-Write",
-      "protocol": ["for_each: pre_write→generate→post_write", "compression_check", "two_chapter_rule_check"]
+      "protocol": [
+        "for_each: pre_write→generate→post_write",
+        "compression_check",
+        "two_chapter_rule_check"
+      ]
     },
     "chapter_reviser": {
       "name": "章节修订器",
       "command": "/修改章节",
       "description": "修改已写章节+级联更新所有受影响的记忆文件",
-      "steps": ["读取原章节", "用户修改指令", "生成修改版", "Diff对比", "级联更新记忆", "影响报告"]
+      "steps": [
+        "读取原章节",
+        "用户修改指令",
+        "生成修改版",
+        "Diff对比",
+        "级联更新记忆",
+        "影响报告"
+      ]
     },
     "memory_updater": {
       "name": "记忆更新器",
       "command": "/更新记忆",
-      "description": "手动触发全面记忆更新和一致性审计"
+      "description": "每章强制执行；同步章节变更到记忆系统，包含状态/追踪器/摘要增量更新"
     },
     "consistency_checker": {
       "name": "一致性审计器",
       "command": "/检查一致性",
-      "description": "全面检查剧情/人物/设定/风格一致性"
+      "description": "每章强制执行；全面检查剧情/人物/设定/风格一致性"
     },
     "memory_searcher": {
       "name": "记忆检索器",
@@ -319,51 +536,258 @@
     "style_calibrator": {
       "name": "风格校准器",
       "command": "/风格校准",
-      "description": "对比当前写作与风格锚点，检查偏离并给出修正建议"
+      "description": "每章强制执行；对比当前写作与风格锚点，检查偏离并给出修正建议"
     },
     "editor": {
       "name": "校稿编辑器",
       "command": "/校稿",
-      "description": "专业校稿和去AI化润色（含风格一致性检查）",
-      "modes": ["全面", "快速", "去AI", "精修"]
+      "description": "每章强制执行的发布门禁；专业校稿和去AI化润色（含风格一致性检查）",
+      "modes": [
+        "全面",
+        "快速",
+        "去AI",
+        "精修"
+      ]
+    },
+    "idea_to_epic": {
+      "name": "模糊想法开书器",
+      "command": "/写全篇",
+      "description": "将模糊剧情思路分解为百万字可执行路线图与冲刺计划"
+    },
+    "style_extractor": {
+      "name": "风格提取器",
+      "command": "/风格提取",
+      "description": "基于用户样章提取风格特征并自动入库（项目+全局）",
+      "script": "scripts/style_fingerprint.py"
+    },
+    "genre_style_advisor": {
+      "name": "题材风格顾问",
+      "command": "/题材选风格",
+      "description": "按题材矩阵和风格库给出组合风格建议"
+    },
+    "style_transfer": {
+      "name": "风格迁移器",
+      "command": "/风格迁移",
+      "description": "将已入库风格档案应用到当前章节草稿"
+    },
+    "style_library_searcher": {
+      "name": "风格库检索器",
+      "command": "/风格库检索",
+      "description": "检索全局风格库并输出复用建议"
+    },
+    "gate_checker": {
+      "name": "门禁校验器",
+      "command": "/门禁检查",
+      "description": "每章强制执行；脚本化校验章节门禁产物并给出发布判定",
+      "script": "scripts/chapter_gate_check.py"
+    },
+    "portable_installer": {
+      "name": "跨工具安装器",
+      "command": "/安装到多工具",
+      "description": "使用 scripts/install-portable-skill.sh 将技能安装到 codex/claude code/opencode/gemini cli/antigravity"
     }
   },
-
   "workflow": {
     "stages": [
-      {"id": "stage1_analyze", "name": "拆书学习", "command": "/拆书"},
-      {"id": "stage2_imitate", "name": "仿写学习+风格提取", "command": "/仿写"},
-      {"id": "stage3_knowledge", "name": "知识库构建+记忆初始化", "command": "/建库"},
-      {"id": "stage4_generate", "name": "章节生成（Smart State协议）", "command": "/写作"},
-      {"id": "stage4b_batch", "name": "批量生成", "command": "/批量写作"},
-      {"id": "stage5_revise", "name": "章节修订", "command": "/修改章节"},
-      {"id": "stage6_update", "name": "记忆更新", "command": "/更新记忆"},
-      {"id": "stage7_calibrate", "name": "风格校准", "command": "/风格校准"},
-      {"id": "stage8_edit", "name": "校稿编辑", "command": "/校稿"}
-    ]
+      {
+        "id": "stage0_idea",
+        "name": "模糊想法开书",
+        "command": "/写全篇"
+      },
+      {
+        "id": "stage1_analyze",
+        "name": "拆书学习",
+        "command": "/拆书"
+      },
+      {
+        "id": "stage2_imitate",
+        "name": "仿写学习",
+        "command": "/仿写"
+      },
+      {
+        "id": "stage3_style_extract",
+        "name": "样章风格提取",
+        "command": "/风格提取"
+      },
+      {
+        "id": "stage4_genre_style",
+        "name": "题材风格选择",
+        "command": "/题材选风格"
+      },
+      {
+        "id": "stage5_knowledge",
+        "name": "知识库构建",
+        "command": "/建库"
+      },
+      {
+        "id": "stage6_generate",
+        "name": "章节生成",
+        "command": "/写作"
+      },
+      {
+        "id": "stage7_resume",
+        "name": "续写恢复",
+        "command": "/续写"
+      },
+      {
+        "id": "stage8_batch",
+        "name": "批量生成",
+        "command": "/批量写作"
+      },
+      {
+        "id": "stage9_revise",
+        "name": "章节修订",
+        "command": "/修改章节"
+      },
+      {
+        "id": "stage10_update",
+        "name": "每章记忆更新（强制）",
+        "command": "/更新记忆"
+      },
+      {
+        "id": "stage11_consistency",
+        "name": "每章一致性审计（强制）",
+        "command": "/检查一致性"
+      },
+      {
+        "id": "stage12_calibrate",
+        "name": "每章风格校准（强制）",
+        "command": "/风格校准"
+      },
+      {
+        "id": "stage13_edit",
+        "name": "校稿编辑（发布门禁）",
+        "command": "/校稿"
+      },
+      {
+        "id": "stage14_gate",
+        "name": "章节门禁检查（强制）",
+        "command": "/门禁检查"
+      }
+    ],
+    "chapter_standard_pipeline": [
+      "/写作",
+      "/更新记忆",
+      "/检查一致性",
+      "/风格校准",
+      "/校稿",
+      "/门禁检查"
+    ],
+    "routes": {
+      "from_idea": [
+        "/写全篇",
+        "/建库",
+        "/写作",
+        "/更新记忆",
+        "/检查一致性",
+        "/风格校准",
+        "/校稿",
+        "/门禁检查"
+      ],
+      "from_samples": [
+        "/仿写",
+        "/风格提取",
+        "/题材选风格",
+        "/写作",
+        "/更新记忆",
+        "/检查一致性",
+        "/风格校准",
+        "/校稿",
+        "/门禁检查"
+      ],
+      "resume_project": [
+        "/续写",
+        "/写作",
+        "/更新记忆",
+        "/检查一致性",
+        "/风格校准",
+        "/校稿",
+        "/门禁检查"
+      ],
+      "multi_tool_bootstrap": [
+        "/安装到多工具",
+        "/写全篇",
+        "/写作",
+        "/更新记忆",
+        "/检查一致性",
+        "/风格校准",
+        "/校稿",
+        "/门禁检查"
+      ]
+    }
   },
-
   "output": {
     "directory_structure": {
       "root": "novel_project_{name}",
       "subdirectories": [
-        {"name": "00_memory", "description": "长期记忆系统", "files": [
-          "novel_plan.md", "novel_state.md", "novel_findings.md",
-          "character_tracker.md", "timeline.md", "foreshadowing_tracker.md",
-          "world_state.md", "style_anchor.md", "chapter_summaries/"
-        ]},
-        {"name": "01_analysis", "description": "拆书分析报告"},
-        {"name": "02_knowledge_base", "description": "12个知识库模块"},
-        {"name": "03_manuscript", "description": "正文章节"},
-        {"name": "04_editing", "description": "校稿记录"},
-        {"name": "05_assets", "description": "辅助资源"}
+        {
+          "name": "00_memory",
+          "description": "长期记忆系统",
+          "files": [
+            "novel_plan.md",
+            "novel_state.md",
+            "novel_findings.md",
+            "character_tracker.md",
+            "timeline.md",
+            "foreshadowing_tracker.md",
+            "world_state.md",
+            "style_anchor.md",
+            "chapter_summaries/",
+            "idea_seed.md",
+            "million_word_blueprint.md",
+            "style_profiles/"
+          ]
+        },
+        {
+          "name": "01_analysis",
+          "description": "拆书分析报告"
+        },
+        {
+          "name": "02_knowledge_base",
+          "description": "12个知识库模块",
+          "files": [
+            "12_style_skills.md"
+          ]
+        },
+        {
+          "name": "03_manuscript",
+          "description": "正文章节"
+        },
+        {
+          "name": "04_editing",
+          "description": "校稿记录",
+          "files": [
+            "gate_artifacts/"
+          ]
+        },
+        {
+          "name": "05_assets",
+          "description": "辅助资源"
+        }
       ]
     }
   },
-
   "mcp_integration": {
     "sequential": "复杂剧情逻辑分析、一致性推理、审计",
     "context7": "查询写作技巧、文学理论",
     "tavily": "查找参考资料、对标作品信息"
+  },
+  "compatibility": {
+    "supported_tools": [
+      "codex",
+      "claude-code",
+      "opencode",
+      "gemini-cli",
+      "antigravity"
+    ],
+    "installer": "scripts/install-portable-skill.sh",
+    "install_reference": "references/multi-tool-install.md",
+    "entry_files": {
+      "codex": "SKILL.md",
+      "claude-code": "CLAUDE.md",
+      "opencode": "OPENCODE.md",
+      "gemini-cli": "GEMINI.md",
+      "antigravity": "ANTIGRAVITY.md"
+    }
   }
 }
