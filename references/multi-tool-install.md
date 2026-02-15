@@ -51,3 +51,19 @@ bash scripts/install-portable-skill.sh --tool <tool> --dest <目标目录> --for
 - `novel-creator.json`
 - 对应工具入口文件（如 `CLAUDE.md` / `GEMINI.md` / `OPENCODE.md` / `ANTIGRAVITY.md`）
 - `TOOL_COMPAT.json`
+
+推荐写作链路（跨工具一致）：
+1. `/新手模式 开启`
+2. `/一键开书`
+3. `/继续写`
+4. `/修复本章`（仅门禁失败时）
+
+高级链路（可选）：
+1. `/剧情检索`
+2. `/写作`
+3. `/更新记忆`
+4. `/检查一致性`
+5. `/风格校准`
+6. `/校稿`
+7. `/门禁检查`
+8. `/更新剧情索引`

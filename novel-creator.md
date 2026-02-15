@@ -1,4 +1,7 @@
-# 📖 小说创作大师 (Novel Creator) v5.1
+# 小说创作大师 (Novel Creator) 兼容说明
+
+> 本文件用于兼容旧入口；最新流程与命令说明以 `SKILL.md`（v6.4）为准。  
+> 新增命令：`/剧情检索`、`/更新剧情索引`；章节强制存储策略：`03_manuscript/*.md` 与 `02_knowledge_base/` 隔离。
 
 ## 简介
 

@@ -1,8 +1,8 @@
 {
   "id": "novel-creator",
   "name": "小说创作大师（跨工具兼容版）",
-  "description": "支持 Codex / Claude Code / OpenCode / Gemini CLI / Antigravity 的跨工具小说创作技能，含低上下文写作与强制章节门禁（更新记忆→一致性检查→风格校准→校稿→门禁检查）。",
-  "version": "6.3.0",
+  "description": "支持 Codex / Claude Code / OpenCode / Gemini CLI / Antigravity 的跨工具小说创作技能。新手默认三命令（/一键开书、/继续写、/修复本章），并内置低上下文写作与强制章节门禁。",
+  "version": "7.0.0",
   "features": [
     "Smart State模式",
     "一致性审计",
@@ -34,13 +34,25 @@
     "题材风格引导",
     "风格校准",
     "风格迁移",
-    "风格锚点"
+    "风格锚点",
+    "剧情RAG检索",
+    "章节存储隔离",
+    "条件触发检索",
+    "片段级召回",
+    "查询缓存",
+    "新手三命令流程",
+    "一键开书",
+    "自动失败修复"
   ],
   "activation": {
     "patterns": [
       "/novel-analyze",
       "/novel-create",
+      "/一键开书",
       "/仿写",
+      "/修复本章",
+      "/继续写",
+      "/新手模式",
       "/伏笔状态",
       "/修改章节",
       "/写作",
@@ -53,6 +65,8 @@
       "/更新记忆",
       "/校稿",
       "/检查一致性",
+      "/更新剧情索引",
+      "/剧情检索",
       "/检索记忆",
       "/续写",
       "/角色状态",
@@ -71,6 +85,7 @@
       "小说创作",
       "小说知识库",
       "拆书",
+      "剧情检索",
       "模糊剧情思路",
       "生成人设",
       "生成大纲",
@@ -80,6 +95,7 @@
       "黄金开篇"
     ],
     "triggers": [
+      "用户希望最简单上手流程",
       "用户只有模糊剧情思路",
       "用户希望按题材选择风格",
       "用户提供样章并要求模仿风格",
@@ -95,6 +111,9 @@
       "用户需要检查一致性",
       "用户需要生成小说元素",
       "用户需要继续写作（续写）",
+      "用户需要一键自动推进一章",
+      "用户希望门禁失败后自动给修复步骤",
+      "用户希望写前自动匹配相关章节上下文",
       "用户需要风格校准",
       "用户需要验证章节是否达到发布标准"
     ]
@@ -209,11 +228,34 @@
       "project_profile_path": "00_memory/style_profiles/",
       "knowledge_base_file": "02_knowledge_base/12_style_skills.md"
     },
+    "plot_retrieval": {
+      "index_file": "00_memory/retrieval/story_index.json",
+      "entity_map_file": "00_memory/retrieval/entity_chapter_map.json",
+      "context_file": "00_memory/retrieval/next_plot_context.md",
+      "cache_file": "00_memory/retrieval/query_cache.json",
+      "script": "scripts/plot_rag_retriever.py",
+      "build_command": "python3 scripts/plot_rag_retriever.py build --project-root <项目目录>",
+      "full_rebuild_command": "python3 scripts/plot_rag_retriever.py build --project-root <项目目录> --full-rebuild",
+      "query_command": "python3 scripts/plot_rag_retriever.py query --project-root <项目目录> --query \"<新剧情>\" --top-k 4 --auto-build",
+      "conditional_trigger_default": true,
+      "passage_retrieval_default": {
+        "passages_per_chapter": 2,
+        "passage_max_chars": 220
+      }
+    },
+    "chapter_storage_policy": {
+      "chapter_dir": "03_manuscript/",
+      "chapter_ext": ".md",
+      "knowledge_base_dir": "02_knowledge_base/",
+      "rule": "章节必须保存到 03_manuscript/*.md，禁止混入 02_knowledge_base/"
+    },
     "token_budget_policy": {
       "default_prewrite_reads": [
         "00_memory/novel_plan.md",
         "00_memory/novel_state.md"
       ],
+      "retrieval_read_hint": "新剧情时先执行 /剧情检索，再按 next_plot_context.md 只读 Top 章节关键片段",
+      "indexing_hint": "/更新剧情索引 默认增量，仅重算变更章节",
       "max_files_per_chapter": 4,
       "strategy": "默认最小读取，按需扩展，禁止全量加载",
       "deep_calibration_every_n_chapters": 10
@@ -228,7 +270,33 @@
         "publish_ready.md",
         "gate_result.json"
       ],
+      "optional_files_on_failure": [
+        "repair_plan.md"
+      ],
       "verification_script": "scripts/chapter_gate_check.py"
+    }
+  },
+  "user_experience": {
+    "default_mode": "beginner",
+    "beginner_mode": {
+      "entry_command": "/一键开书",
+      "daily_command": "/继续写",
+      "repair_command": "/修复本章",
+      "hidden_advanced_parameters": true,
+      "guidance_style": "每次只给下一步命令"
+    },
+    "advanced_mode": {
+      "entry_command": "/写全篇",
+      "daily_pipeline": [
+        "/剧情检索",
+        "/写作",
+        "/更新记忆",
+        "/检查一致性",
+        "/风格校准",
+        "/校稿",
+        "/门禁检查",
+        "/更新剧情索引"
+      ]
     }
   },
   "hooks": {
@@ -274,9 +342,13 @@
         {
           "condition": "涉及具体设定",
           "action": "Read 知识库相关文件"
+        },
+        {
+          "condition": "出现新剧情/新冲突/回收伏笔",
+          "action": "条件触发执行 /剧情检索，并读取 next_plot_context.md 返回的关键片段"
         }
       ],
-      "output": "写前检查清单（进度/计划/人物/伏笔/节奏/章末钩子/一致性）"
+      "output": "写前检查清单（进度/计划/人物/伏笔/节奏/章末钩子/一致性/剧情检索建议）"
     },
     "post_write": {
       "name": "Post-Write Protocol",
@@ -311,6 +383,11 @@
         },
         {
           "order": 6,
+          "action": "执行 /更新剧情索引",
+          "purpose": "将新章节写入检索索引，保障后续长程一致性"
+        },
+        {
+          "order": 7,
           "action": "更新 novel_plan.md checkbox",
           "purpose": "进度追踪"
         }
@@ -365,6 +442,35 @@
       ],
       "output": "开书路线图（可直接进入写作迭代）"
     },
+    "one_click_bootstrap": {
+      "name": "One-Click Bootstrap Protocol",
+      "trigger": "/一键开书",
+      "mandatory": true,
+      "steps": [
+        "执行 /写全篇",
+        "执行 /建库",
+        "执行 /更新剧情索引",
+        "生成首章写作任务",
+        "引导用户执行 /继续写"
+      ],
+      "output": "新手可直接开写的项目骨架"
+    },
+    "continue_write": {
+      "name": "Continue Write Protocol",
+      "trigger": "/继续写",
+      "mandatory": true,
+      "steps": [
+        "条件触发执行 /剧情检索",
+        "执行 /写作",
+        "执行 /更新记忆",
+        "执行 /检查一致性",
+        "执行 /风格校准",
+        "执行 /校稿",
+        "执行 /门禁检查",
+        "执行 /更新剧情索引"
+      ],
+      "output": "章节发布结果或失败修复入口"
+    },
     "style_extraction": {
       "name": "Style Extraction Protocol",
       "trigger": "/风格提取",
@@ -377,6 +483,21 @@
         "更新全局 style_library/index.md"
       ],
       "output": "可跨项目复用的风格技能"
+    },
+    "plot_retrieval": {
+      "name": "Plot Retrieval Protocol",
+      "trigger": "/剧情检索 或写前检测到新剧情",
+      "mandatory": false,
+      "script": "scripts/plot_rag_retriever.py",
+      "steps": [
+        "读取 novel_plan.md 与 novel_state.md",
+        "条件触发执行 scripts/plot_rag_retriever.py query --auto-build",
+        "轻场景自动跳过，复杂场景返回章节关键片段（非整章）",
+        "命中缓存时复用历史结果，降低重复检索成本",
+        "生成 next_plot_context.md",
+        "按 Top 章节最小读取补全上下文"
+      ],
+      "output": "写前剧情检索建议（章节回读 + 角色关系片段）"
     },
     "gate_verification": {
       "name": "Gate Verification Protocol",
@@ -392,6 +513,14 @@
         "publish_ready.md"
       ],
       "output": "gate_result.json"
+    },
+    "gate_repair": {
+      "name": "Gate Repair Protocol",
+      "trigger": "/修复本章 或门禁失败后",
+      "mandatory": false,
+      "script": "scripts/gate_repair_plan.py",
+      "command": "python3 scripts/gate_repair_plan.py --project-root <项目目录> --chapter-file <章节文件>",
+      "output": "repair_plan.md（最短修复路径）"
     }
   },
   "consistency_engine": {
@@ -433,6 +562,27 @@
     }
   },
   "modules": {
+    "mode_switcher": {
+      "name": "模式切换器",
+      "command": "/新手模式",
+      "description": "切换新手/高级模式。新手模式默认只推荐 /一键开书、/继续写、/修复本章"
+    },
+    "one_click_bootstrap": {
+      "name": "一键开书器",
+      "command": "/一键开书",
+      "description": "自动串联 /写全篇 + /建库 + /更新剧情索引，输出首章任务"
+    },
+    "continue_writer": {
+      "name": "继续写作器",
+      "command": "/继续写",
+      "description": "自动串行完整章节流程：检索→写作→门禁→索引更新"
+    },
+    "gate_repairer": {
+      "name": "门禁修复器",
+      "command": "/修复本章",
+      "description": "读取 gate_result.json 并生成最短修复步骤",
+      "script": "scripts/gate_repair_plan.py"
+    },
     "analyzer": {
       "name": "拆书分析器",
       "command": "/拆书",
@@ -458,6 +608,18 @@
         "从仿写分析初始化 style_anchor.md",
         "创建 chapter_summaries/ 目录"
       ]
+    },
+    "plot_indexer": {
+      "name": "剧情索引构建器",
+      "command": "/更新剧情索引",
+      "description": "扫描 03_manuscript/*.md 建立剧情检索索引与角色-章节映射",
+      "script": "scripts/plot_rag_retriever.py"
+    },
+    "plot_retriever": {
+      "name": "剧情检索器",
+      "command": "/剧情检索",
+      "description": "根据新剧情描述做条件触发检索，返回关键片段与角色关系片段，并支持缓存复用",
+      "script": "scripts/plot_rag_retriever.py"
     },
     "generator": {
       "name": "内容生成器",
@@ -590,6 +752,16 @@
   "workflow": {
     "stages": [
       {
+        "id": "stage-2_mode",
+        "name": "新手模式切换",
+        "command": "/新手模式"
+      },
+      {
+        "id": "stage-1_easy_start",
+        "name": "一键开书",
+        "command": "/一键开书"
+      },
+      {
         "id": "stage0_idea",
         "name": "模糊想法开书",
         "command": "/写全篇"
@@ -618,6 +790,11 @@
         "id": "stage5_knowledge",
         "name": "知识库构建",
         "command": "/建库"
+      },
+      {
+        "id": "stage5b_plot_retrieval",
+        "name": "写前剧情检索",
+        "command": "/剧情检索"
       },
       {
         "id": "stage6_generate",
@@ -663,56 +840,76 @@
         "id": "stage14_gate",
         "name": "章节门禁检查（强制）",
         "command": "/门禁检查"
+      },
+      {
+        "id": "stage15_index",
+        "name": "更新剧情索引",
+        "command": "/更新剧情索引"
+      },
+      {
+        "id": "stage16_repair",
+        "name": "门禁失败修复",
+        "command": "/修复本章"
       }
     ],
+    "beginner_quickstart": [
+      "/一键开书",
+      "/继续写",
+      "/修复本章"
+    ],
     "chapter_standard_pipeline": [
+      "/剧情检索",
       "/写作",
       "/更新记忆",
       "/检查一致性",
       "/风格校准",
       "/校稿",
-      "/门禁检查"
+      "/门禁检查",
+      "/更新剧情索引"
     ],
     "routes": {
+      "newbie_minimal": [
+        "/一键开书",
+        "/继续写",
+        "/修复本章"
+      ],
       "from_idea": [
         "/写全篇",
         "/建库",
+        "/更新剧情索引",
+        "/剧情检索",
         "/写作",
         "/更新记忆",
         "/检查一致性",
         "/风格校准",
         "/校稿",
-        "/门禁检查"
+        "/门禁检查",
+        "/更新剧情索引"
       ],
       "from_samples": [
         "/仿写",
         "/风格提取",
         "/题材选风格",
+        "/更新剧情索引",
+        "/剧情检索",
         "/写作",
         "/更新记忆",
         "/检查一致性",
         "/风格校准",
         "/校稿",
-        "/门禁检查"
+        "/门禁检查",
+        "/更新剧情索引"
       ],
       "resume_project": [
         "/续写",
-        "/写作",
-        "/更新记忆",
-        "/检查一致性",
-        "/风格校准",
-        "/校稿",
-        "/门禁检查"
+        "/继续写"
       ],
       "multi_tool_bootstrap": [
         "/安装到多工具",
-        "/写全篇",
-        "/写作",
-        "/更新记忆",
-        "/检查一致性",
-        "/风格校准",
-        "/校稿",
-        "/门禁检查"
+        "/新手模式 开启",
+        "/一键开书",
+        "/继续写",
+        "/修复本章"
       ]
     }
   },
@@ -733,6 +930,7 @@
             "world_state.md",
             "style_anchor.md",
             "chapter_summaries/",
+            "retrieval/",
             "idea_seed.md",
             "million_word_blueprint.md",
             "style_profiles/"
@@ -751,7 +949,7 @@
         },
         {
           "name": "03_manuscript",
-          "description": "正文章节"
+          "description": "正文章节（仅存放 .md 章节文件）"
         },
         {
           "name": "04_editing",

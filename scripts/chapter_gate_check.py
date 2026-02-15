@@ -34,6 +34,31 @@ def required_artifacts(gate_dir: Path) -> Dict[str, Path]:
     }
 
 
+def check_chapter_storage(project_root: Path, chapter_path: Path) -> Tuple[bool, str]:
+    if chapter_path.suffix.lower() != ".md":
+        return False, "章节文件必须是 .md 格式"
+    try:
+        rel = chapter_path.relative_to(project_root)
+    except ValueError:
+        return False, "章节文件不在项目目录内"
+    rel_posix = rel.as_posix()
+    if not rel_posix.startswith("03_manuscript/"):
+        return False, "章节文件必须存放在 03_manuscript/ 目录下"
+    return True, "通过"
+
+
+def find_misplaced_chapters(project_root: Path) -> List[str]:
+    kb_dir = project_root / "02_knowledge_base"
+    if not kb_dir.exists():
+        return []
+    bad: List[str] = []
+    chapter_name_re = re.compile(r"^第\d+章.*\.md$")
+    for p in kb_dir.rglob("*.md"):
+        if chapter_name_re.match(p.name):
+            bad.append(str(p))
+    return bad
+
+
 def check_file(path: Path, min_bytes: int, chapter_mtime: float) -> Tuple[bool, str]:
     if not path.exists():
         return False, "文件不存在"
@@ -86,6 +111,7 @@ def main() -> int:
         "passed": False,
         "checks": [],
         "failures": [],
+        "warnings": [],
     }
 
     if not chapter_path.exists():
@@ -94,6 +120,36 @@ def main() -> int:
         out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2
+
+    ok, msg = check_chapter_storage(project_root, chapter_path)
+    result["checks"].append(
+        {"name": "chapter_storage_policy", "path": str(chapter_path), "ok": ok, "message": msg}
+    )
+    if not ok:
+        result["failures"].append(f"chapter_storage_policy: {msg}")
+
+    misplaced = find_misplaced_chapters(project_root)
+    if misplaced:
+        result["failures"].append("knowledge_base_contains_chapter_files: 发现章节文件混入 02_knowledge_base")
+        result["checks"].append(
+            {
+                "name": "knowledge_base_isolation",
+                "path": str(project_root / "02_knowledge_base"),
+                "ok": False,
+                "message": f"发现 {len(misplaced)} 个疑似章节文件",
+            }
+        )
+        for p in misplaced:
+            result["warnings"].append(f"请迁移文件到 03_manuscript: {p}")
+    else:
+        result["checks"].append(
+            {
+                "name": "knowledge_base_isolation",
+                "path": str(project_root / "02_knowledge_base"),
+                "ok": True,
+                "message": "通过",
+            }
+        )
 
     chapter_mtime = chapter_path.stat().st_mtime
     artifacts = required_artifacts(gate_dir)
