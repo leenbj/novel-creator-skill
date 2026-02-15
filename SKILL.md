@@ -3,7 +3,12 @@ name: novel-creator-skill
 description: 用于中文小说全流程创作。将模糊剧情思路推进为百万字级长篇路线图，在低上下文开销下执行章节写作，并通过强制质量门禁（更新记忆→一致性检查→风格校准→校稿→门禁检查）确保每章可发布，支持样章风格提取、跨项目风格复用与题材风格引导。
 ---
 
-# 小说创作技能（新手优先完整说明版 v7.0）
+# 小说创作技能（新手优先完整说明版 v7.1）
+
+## 更新说明（v7.1）
+- 修复 `/继续写` 占位章误判：正文中偶发“待写”文本不再被误判为草稿。
+- 优化自动成稿上下文清洗：检索摘要会自动去除占位标记，降低脏上下文污染。
+- 补齐端到端回归验证：`scripts/test_novel_flow_executor.py` 三项测试全部通过。
 
 ## 更新说明（v7.0）
 - 新增新手三命令流程：`/一键开书`、`/继续写`、`/修复本章`。
@@ -155,6 +160,17 @@ python3 scripts/gate_repair_plan.py \
 
 脚本会读取 `04_editing/gate_artifacts/<chapter_id>/gate_result.json`，生成 `repair_plan.md` 并输出最短修复步骤。
 
+执行 `/一键开书` 与 `/继续写` 的真实执行器：
+
+```bash
+python3 scripts/novel_flow_executor.py one-click --project-root <项目目录> --title <书名> --genre <题材> --idea <剧情种子>
+python3 scripts/novel_flow_executor.py continue-write --project-root <项目目录> --query "<新剧情>"
+```
+
+说明：
+- `one-click` 会真正创建项目目录、初始化记忆文件、创建首章草稿、构建检索索引。
+- `continue-write` 会真正执行检索与章节流程联动；若章节已成稿会触发门禁并在失败时联动修复计划。
+
 ## 7. 详细说明按需读取
 - 命令手册：`references/command-playbook.md`
 - 门禁产物规范：`references/gate-artifacts-spec.md`
@@ -180,6 +196,7 @@ python3 scripts/gate_repair_plan.py \
 - 何时使用：第一次开项目，或希望跳过复杂命令编排。
 - 输入：题材、剧情种子、主角目标、核心冲突、预期篇幅。
 - 输出：项目目录初始化完成 + 首章任务清单（可直接 `/继续写`）。
+- 执行器：`python3 scripts/novel_flow_executor.py one-click --project-root <项目目录> --title <书名> --genre <题材> --idea <剧情种子>`。
 
 `/继续写`
 - 功能：新手日常唯一主命令，自动串行完整章节流程。
@@ -187,6 +204,7 @@ python3 scripts/gate_repair_plan.py \
 - 输入：本章目标（可选），冲突（可选），角色（可选）。
 - 自动流程：`/剧情检索`（条件触发）→ `/写作` → `/更新记忆` → `/检查一致性` → `/风格校准` → `/校稿` → `/门禁检查` → `/更新剧情索引`。
 - 输出：章节发布稿或失败报告。
+- 执行器：`python3 scripts/novel_flow_executor.py continue-write --project-root <项目目录> --query "<新剧情>"`。
 
 `/修复本章`
 - 功能：针对门禁失败章节自动生成最短修复路径。

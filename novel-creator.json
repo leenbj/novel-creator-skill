@@ -2,7 +2,7 @@
   "id": "novel-creator",
   "name": "小说创作大师（跨工具兼容版）",
   "description": "支持 Codex / Claude Code / OpenCode / Gemini CLI / Antigravity 的跨工具小说创作技能。新手默认三命令（/一键开书、/继续写、/修复本章），并内置低上下文写作与强制章节门禁。",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "features": [
     "Smart State模式",
     "一致性审计",
@@ -42,7 +42,9 @@
     "查询缓存",
     "新手三命令流程",
     "一键开书",
-    "自动失败修复"
+    "自动失败修复",
+    "真实流程执行器",
+    "占位章严格识别"
   ],
   "activation": {
     "patterns": [
@@ -113,6 +115,7 @@
       "用户需要继续写作（续写）",
       "用户需要一键自动推进一章",
       "用户希望门禁失败后自动给修复步骤",
+      "用户希望命令可以直接脚本执行而非仅流程提示",
       "用户希望写前自动匹配相关章节上下文",
       "用户需要风格校准",
       "用户需要验证章节是否达到发布标准"
@@ -278,12 +281,18 @@
   },
   "user_experience": {
     "default_mode": "beginner",
+    "executor_script": "scripts/novel_flow_executor.py",
     "beginner_mode": {
       "entry_command": "/一键开书",
       "daily_command": "/继续写",
       "repair_command": "/修复本章",
       "hidden_advanced_parameters": true,
-      "guidance_style": "每次只给下一步命令"
+      "guidance_style": "每次只给下一步命令",
+      "executable_commands": {
+        "one_click": "python3 scripts/novel_flow_executor.py one-click --project-root <项目目录> --title <书名> --genre <题材> --idea <剧情种子>",
+        "continue_write": "python3 scripts/novel_flow_executor.py continue-write --project-root <项目目录> --query \"<新剧情>\"",
+        "repair": "python3 scripts/gate_repair_plan.py --project-root <项目目录> --chapter-file <章节文件>"
+      }
     },
     "advanced_mode": {
       "entry_command": "/写全篇",
@@ -446,6 +455,8 @@
       "name": "One-Click Bootstrap Protocol",
       "trigger": "/一键开书",
       "mandatory": true,
+      "script": "scripts/novel_flow_executor.py",
+      "command": "python3 scripts/novel_flow_executor.py one-click --project-root <项目目录> --title <书名> --genre <题材> --idea <剧情种子>",
       "steps": [
         "执行 /写全篇",
         "执行 /建库",
@@ -459,6 +470,8 @@
       "name": "Continue Write Protocol",
       "trigger": "/继续写",
       "mandatory": true,
+      "script": "scripts/novel_flow_executor.py",
+      "command": "python3 scripts/novel_flow_executor.py continue-write --project-root <项目目录> --query \"<新剧情>\"",
       "steps": [
         "条件触发执行 /剧情检索",
         "执行 /写作",
@@ -570,12 +583,14 @@
     "one_click_bootstrap": {
       "name": "一键开书器",
       "command": "/一键开书",
-      "description": "自动串联 /写全篇 + /建库 + /更新剧情索引，输出首章任务"
+      "description": "自动串联 /写全篇 + /建库 + /更新剧情索引，输出首章任务",
+      "script": "scripts/novel_flow_executor.py"
     },
     "continue_writer": {
       "name": "继续写作器",
       "command": "/继续写",
-      "description": "自动串行完整章节流程：检索→写作→门禁→索引更新"
+      "description": "自动串行完整章节流程：检索→写作→门禁→索引更新",
+      "script": "scripts/novel_flow_executor.py"
     },
     "gate_repairer": {
       "name": "门禁修复器",

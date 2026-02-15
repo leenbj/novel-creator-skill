@@ -67,3 +67,7 @@ bash scripts/install-portable-skill.sh --tool <tool> --dest <目标目录> --for
 6. `/校稿`
 7. `/门禁检查`
 8. `/更新剧情索引`
+
+真实执行器（可直接在项目目录运行）：
+- `python3 scripts/novel_flow_executor.py one-click --project-root <项目目录> --title <书名> --genre <题材> --idea <剧情种子>`
+- `python3 scripts/novel_flow_executor.py continue-write --project-root <项目目录> --query "<新剧情>"`
