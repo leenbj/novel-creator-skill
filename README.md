@@ -1,4 +1,4 @@
-# Novel Creator Skill v7.1
+# Novel Creator Skill v7.2
 
 中文小说全流程创作技能，支持 Codex、Claude Code、OpenCode、Gemini CLI、Antigravity 直接安装使用。
 
@@ -7,11 +7,13 @@
 - 每章强制通过门禁流程，降低跑偏与 AI 味。
 - 支持样章风格提取、跨项目风格复用、题材风格引导。
 
-## v7.1 更新
+## v7.2 更新
 
-- 修复 `/继续写` 占位章误判：正文中出现“待写”不再误判为草稿。
-- 优化自动成稿上下文清洗：自动去除占位标记，减少脏上下文污染。
-- 补齐执行器回归测试：`scripts/test_novel_flow_executor.py` 全部通过。
+- 检索升级为“两级检索（粗筛+精排）”，并输出候选池与上下文开销统计。
+- 新增章节 sidecar 元数据：`00_memory/retrieval/chapter_meta/*.meta.json`。
+- `/继续写` 新增幂等缓存、执行锁、写前快照、失败回滚（可配置开关）。
+- 门禁新增质量基线校验（`quality_report` 必须通过），失败时自动最小修复并二次复检。
+- 新增可量化评测脚本：`scripts/benchmark_novel_flow.py`。
 
 ## 项目结构
 
@@ -93,6 +95,17 @@ python3 scripts/novel_flow_executor.py continue-write \
   --query "<新剧情>"
 ```
 
+常用高级参数：
+```bash
+python3 scripts/novel_flow_executor.py continue-write \
+  --project-root <项目目录> \
+  --query "<新剧情>" \
+  --candidate-k 12 \
+  --max-auto-retry-rounds 2 \
+  --rollback-on-failure \
+  --idempotent-cache
+```
+
 门禁检查：
 ```bash
 python3 scripts/chapter_gate_check.py \
@@ -103,7 +116,7 @@ python3 scripts/chapter_gate_check.py \
 剧情索引与检索：
 ```bash
 python3 scripts/plot_rag_retriever.py build --project-root <项目目录>
-python3 scripts/plot_rag_retriever.py query --project-root <项目目录> --query "<新剧情>" --top-k 4 --auto-build
+python3 scripts/plot_rag_retriever.py query --project-root <项目目录> --query "<新剧情>" --top-k 4 --candidate-k 12 --auto-build
 ```
 
 失败修复计划：
@@ -111,6 +124,11 @@ python3 scripts/plot_rag_retriever.py query --project-root <项目目录> --quer
 python3 scripts/gate_repair_plan.py \
   --project-root <项目目录> \
   --chapter-file <章节文件>
+```
+
+流程基线评测：
+```bash
+python3 scripts/benchmark_novel_flow.py --project-root <项目目录> --rounds 5
 ```
 
 ## 命令手册（完整）
@@ -140,6 +158,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_novel_flow_executor.py
 - `one-click` 初始化
 - `continue-write` 自动成稿 + 门禁通过
 - 门禁失败自动重试修复（误放章节迁移）
+- 幂等缓存命中
+- 失败回滚恢复
 
 ## 详细文档
 
@@ -150,4 +170,3 @@ PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_novel_flow_executor.py
 - 百万字路线图：`references/million-word-roadmap.md`
 - 题材风格矩阵：`references/genre-style-matrix.md`
 - 跨工具安装：`references/multi-tool-install.md`
-

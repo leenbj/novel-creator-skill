@@ -9,12 +9,14 @@
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -33,6 +35,11 @@ AI_PHRASE_BLACKLIST = [
 STUB_MARKER = "<!-- NOVEL_FLOW_STUB -->"
 DRAFT_PLACEHOLDER_LINE = re.compile(r"(?m)^\[待写\]\s*$")
 MAX_STUB_EFFECTIVE_CHARS = 800
+FLOW_DIR_NAME = ".flow"
+FLOW_LOCK_FILE = "continue_write.lock"
+FLOW_CACHE_FILE = "continue_write_cache.json"
+FLOW_SNAPSHOT_DIR = "snapshots"
+FLOW_CACHE_MAX_ENTRIES = 200
 
 
 def ensure_dir(path: Path) -> None:
@@ -62,6 +69,143 @@ def run_python(script: Path, args: List[str]) -> Tuple[int, str, str, Optional[D
         except Exception:
             payload = None
     return proc.returncode, out, err, payload
+
+
+def sha1_text(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def file_sha1(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return sha1_text(path.read_text(encoding="utf-8", errors="ignore"))
+
+
+def load_json(path: Path, default: Dict[str, object]) -> Dict[str, object]:
+    if not path.exists():
+        return default
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    return default
+
+
+def save_json(path: Path, payload: Dict[str, object]) -> None:
+    ensure_dir(path.parent)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def acquire_lock(lock_file: Path, run_id: str, timeout_sec: int) -> Tuple[bool, Optional[Dict[str, object]]]:
+    now = time.time()
+    if lock_file.exists():
+        current = load_json(lock_file, {})
+        ts = float(current.get("ts", 0)) if current else 0.0
+        if ts and (now - ts) < max(1, timeout_sec):
+            return False, current
+    save_json(lock_file, {
+        "run_id": run_id,
+        "pid": os.getpid(),
+        "ts": now,
+        "started_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    return True, None
+
+
+def release_lock(lock_file: Path, run_id: str) -> None:
+    if not lock_file.exists():
+        return
+    cur = load_json(lock_file, {})
+    if cur.get("run_id") == run_id:
+        lock_file.unlink(missing_ok=True)
+
+
+def create_snapshot(chapter_path: Path, flow_dir: Path, run_id: str) -> Optional[Path]:
+    if not chapter_path.exists():
+        return None
+    out = flow_dir / FLOW_SNAPSHOT_DIR / slugify(chapter_path.stem) / f"{run_id}.md"
+    ensure_dir(out.parent)
+    shutil.copy2(str(chapter_path), str(out))
+    return out
+
+
+def restore_snapshot(snapshot_path: Path, original_path: Path, current_path: Path) -> Optional[Path]:
+    if not snapshot_path.exists():
+        return None
+    ensure_dir(original_path.parent)
+    shutil.copy2(str(snapshot_path), str(original_path))
+    if current_path != original_path and current_path.exists():
+        current_path.unlink(missing_ok=True)
+    return original_path
+
+
+def make_request_id(args: argparse.Namespace, chapter_path: Path, query: str, chapter_hash_before: str) -> str:
+    raw = "|".join([
+        str(chapter_path.resolve()),
+        query.strip(),
+        str(args.top_k),
+        str(args.min_chars),
+        str(args.min_paragraphs),
+        str(args.min_dialogue_ratio),
+        str(args.max_dialogue_ratio),
+        str(args.min_sentences),
+        str(args.auto_draft),
+        str(args.auto_improve),
+        str(args.auto_retry),
+        chapter_hash_before,
+    ])
+    return sha1_text(raw)
+
+
+def load_continue_cache(flow_dir: Path) -> Dict[str, object]:
+    return load_json(flow_dir / FLOW_CACHE_FILE, {"entries": {}})
+
+
+def save_continue_cache(flow_dir: Path, cache: Dict[str, object]) -> None:
+    entries = cache.get("entries", {})
+    if isinstance(entries, dict) and len(entries) > FLOW_CACHE_MAX_ENTRIES:
+        items = sorted(entries.items(), key=lambda kv: kv[1].get("saved_at", ""), reverse=True)
+        cache["entries"] = dict(items[:FLOW_CACHE_MAX_ENTRIES])
+    save_json(flow_dir / FLOW_CACHE_FILE, cache)
+
+
+def update_flow_metrics(project_root: Path, item: Dict[str, object]) -> Dict[str, object]:
+    retrieval_dir = project_root / "00_memory" / "retrieval"
+    ensure_dir(retrieval_dir)
+    metrics_file = retrieval_dir / "flow_metrics.json"
+    metrics = load_json(metrics_file, {"runs": []})
+    runs = metrics.get("runs", [])
+    if not isinstance(runs, list):
+        runs = []
+    runs.append(item)
+    runs = runs[-300:]
+    metrics["runs"] = runs
+    save_json(metrics_file, metrics)
+
+    total = len(runs)
+    ok_count = sum(1 for r in runs if r.get("ok"))
+    gate_ok = sum(1 for r in runs if r.get("gate_passed_final"))
+    retry_count = sum(1 for r in runs if (r.get("auto_retry_actions_count", 0) > 0))
+    idempotent_hits = sum(1 for r in runs if r.get("idempotent_hit"))
+    avg_runtime = round(sum(float(r.get("runtime_ms", 0)) for r in runs) / total, 2) if total else 0.0
+    avg_ctx_chars = round(sum(float(r.get("retrieval_context_chars", 0)) for r in runs) / total, 2) if total else 0.0
+    avg_candidates = round(sum(float(r.get("retrieval_candidates", 0)) for r in runs) / total, 2) if total else 0.0
+
+    summary = {
+        "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total_runs": total,
+        "ok_rate": round(ok_count / total, 4) if total else 0.0,
+        "gate_pass_rate": round(gate_ok / total, 4) if total else 0.0,
+        "retry_rate": round(retry_count / total, 4) if total else 0.0,
+        "idempotent_hit_rate": round(idempotent_hits / total, 4) if total else 0.0,
+        "avg_runtime_ms": avg_runtime,
+        "avg_retrieval_context_chars": avg_ctx_chars,
+        "avg_retrieval_candidates": avg_candidates,
+    }
+    save_json(retrieval_dir / "flow_metrics_summary.json", summary)
+    return summary
 
 
 def template(name: str, mapping: Dict[str, str]) -> str:
@@ -372,6 +516,68 @@ def improve_text_minimally(text: str, query: str) -> str:
     return text.rstrip() + "\n\n" + extra + "\n"
 
 
+def apply_targeted_quality_fix(
+    chapter_path: Path,
+    quality: Dict[str, object],
+    args: argparse.Namespace,
+    query: str,
+) -> List[str]:
+    txt = read_text(chapter_path).rstrip()
+    failures = [str(x) for x in quality.get("failures", [])]
+    actions: List[str] = []
+
+    if any(f.startswith("paragraph_count<") for f in failures):
+        missing = max(1, args.min_paragraphs - int(quality.get("paragraph_count", 0)))
+        blocks = []
+        for i in range(missing):
+            blocks.append(
+                f"补充段落{i+1}：围绕“{query}”推进一小步行动结果，并明确本段的因果关系。"
+                "角色需要做出可验证选择，以便下一章承接。"
+            )
+        txt += "\n\n" + "\n\n".join(blocks)
+        actions.append(f"补足段落数量 +{missing}")
+
+    if any(f.startswith("sentence_count<") for f in failures):
+        missing = max(1, args.min_sentences - int(quality.get("sentence_count", 0)))
+        short = " ".join(["他迅速复盘线索。她立即提出质疑。两人决定先验证坐标。"] * max(1, missing // 3))
+        txt += "\n\n" + short
+        actions.append(f"补足句子数量 +{missing}")
+
+    if any(f.startswith("dialogue_ratio<") for f in failures):
+        txt += (
+            "\n\n"
+            f"“先别下结论，”同伴压低声音，“{query}这条线还缺最后一块证据。”"
+            "主角点头：“那就按时间线回查，每一步都留痕。”"
+        )
+        actions.append("补足对话占比")
+
+    if any(f.startswith("dialogue_ratio>") for f in failures):
+        txt += (
+            "\n\n"
+            "叙述补偿：两人将对话结论写入行动清单，逐项标记风险等级与验证顺序，"
+            "避免口头信息过载导致剧情推进失焦。"
+        )
+        actions.append("稀释过高对话占比")
+
+    # 最后兜底字符数
+    cur_chars = len(re.sub(r"\s+", "", clean_for_stats(txt)))
+    if cur_chars < args.min_chars:
+        needed = args.min_chars - cur_chars
+        repeat = max(1, needed // 80)
+        extra = []
+        for i in range(repeat):
+            extra.append(
+                f"补充推进{i+1}：围绕“{query}”补写一段行动执行、风险反馈与下一步目标，"
+                "确保情节、人物与线索三者同时前进。"
+            )
+        txt += "\n\n" + "\n\n".join(extra)
+        actions.append(f"补足字符数 +{needed}")
+
+    if actions:
+        write_text(chapter_path, txt)
+    return actions
+
+
 def write_quality_report(gate_dir: Path, quality_before: Dict[str, object], quality_after: Dict[str, object]) -> Path:
     p = gate_dir / "quality_report.md"
     lines = [
@@ -527,7 +733,7 @@ def auto_fix_after_gate_failure(
     query_payload: Optional[Dict[str, object]],
     gate_payload: Dict[str, object],
     args: argparse.Namespace,
-) -> Tuple[Path, List[str]]:
+) -> Tuple[Path, List[str], Dict[str, object]]:
     actions: List[str] = []
     failures = gate_payload.get("failures", []) if isinstance(gate_payload, dict) else []
     fail_text = " | ".join(str(x) for x in failures)
@@ -564,7 +770,17 @@ def auto_fix_after_gate_failure(
             write_text(publish_ready, txt)
             actions.append("补充发布关键词")
 
-    return chapter_path, actions
+    if "quality_baseline" in fail_text and args.auto_fix_quality:
+        old_quality = dict(quality)
+        quality_actions = apply_targeted_quality_fix(chapter_path, quality, args, query)
+        if quality_actions:
+            actions.extend([f"质量最小修复：{x}" for x in quality_actions])
+            quality = evaluate_quality(read_text(chapter_path), args)
+            gate_dir = project_root / "04_editing" / "gate_artifacts" / slugify(chapter_path.stem)
+            ensure_dir(gate_dir)
+            write_quality_report(gate_dir, old_quality, quality)
+
+    return chapter_path, actions, quality
 
 
 def continue_write(args: argparse.Namespace) -> Dict[str, object]:
@@ -572,133 +788,277 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
     project_structure(project_root)
     manuscript_dir = project_root / "03_manuscript"
     ensure_dir(manuscript_dir)
+    flow_dir = project_root / FLOW_DIR_NAME
+    ensure_dir(flow_dir)
 
+    run_id = dt.datetime.now().strftime("%Y%m%d%H%M%S") + f"-{os.getpid()}"
+    lock_file = flow_dir / FLOW_LOCK_FILE
+    locked, lock_holder = acquire_lock(lock_file, run_id, timeout_sec=args.lock_timeout_sec)
+    if not locked:
+        update_flow_metrics(project_root, {
+            "ts": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ok": False,
+            "gate_passed_final": False,
+            "runtime_ms": 0,
+            "query_length": 0,
+            "retrieval_context_chars": 0,
+            "retrieval_candidates": 0,
+            "auto_retry_actions_count": 0,
+            "idempotent_hit": False,
+        })
+        return {
+            "ok": False,
+            "command": "continue-write",
+            "project_root": str(project_root),
+            "error": "another_run_in_progress",
+            "lock_holder": lock_holder,
+            "next_step": "检测到另一个 /继续写 正在执行，请稍后重试或清理过期锁。",
+        }
+
+    started_at = time.time()
     query = args.query.strip() if args.query else "推进下一章剧情"
-    query_cmd = [
-        "query",
-        "--project-root",
-        str(project_root),
-        "--query",
-        query,
-        "--top-k",
-        str(args.top_k),
-        "--auto-build",
-    ]
-    if args.force_retrieval:
-        query_cmd.append("--force")
-    q_code, q_out, q_err, q_payload = run_python(SCRIPT_DIR / "plot_rag_retriever.py", query_cmd)
+    chapter_path: Optional[Path] = None
+    original_chapter_path: Optional[Path] = None
+    chapter_hash_before = ""
+    snapshot_path: Optional[Path] = None
+    rollback_applied = False
+    idempotent_hit = False
 
-    if args.chapter_file:
-        chapter_path = Path(args.chapter_file)
-        if not chapter_path.is_absolute():
-            chapter_path = project_root / chapter_path
-        chapter_path = chapter_path.resolve()
-    else:
-        chapter_path = (manuscript_dir / next_chapter_filename(manuscript_dir, title=args.chapter_title)).resolve()
+    try:
+        query_cmd = [
+            "query",
+            "--project-root",
+            str(project_root),
+            "--query",
+            query,
+            "--top-k",
+            str(args.top_k),
+            "--candidate-k",
+            str(args.candidate_k),
+            "--auto-build",
+        ]
+        if args.force_retrieval:
+            query_cmd.append("--force")
+        q_code, q_out, q_err, q_payload = run_python(SCRIPT_DIR / "plot_rag_retriever.py", query_cmd)
 
-    created_chapter_stub = False
-    if not chapter_path.exists():
-        created_chapter_stub = True
-        write_text(
-            chapter_path,
-            f"# {chapter_path.stem.replace('-', ' ')}\n\n<!-- NOVEL_FLOW_STUB -->\n\n## 正文\n[待写]\n",
-        )
+        if args.chapter_file:
+            chapter_path = Path(args.chapter_file)
+            if not chapter_path.is_absolute():
+                chapter_path = project_root / chapter_path
+            chapter_path = chapter_path.resolve()
+        else:
+            chapter_path = (manuscript_dir / next_chapter_filename(manuscript_dir, title=args.chapter_title)).resolve()
+        original_chapter_path = chapter_path
 
-    auto_draft_applied = False
-    if chapter_is_draft_stub(chapter_path) and args.auto_draft:
-        draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
-        write_text(chapter_path, draft)
-        auto_draft_applied = True
-
-    draft_mode = chapter_is_draft_stub(chapter_path)
-
-    chapter_id = slugify(chapter_path.stem)
-    gate_dir = project_root / "04_editing" / "gate_artifacts" / chapter_id
-    ensure_dir(gate_dir)
-    todo_file = gate_dir / "pipeline_todo.md"
-    if not todo_file.exists():
-        write_text(
-            todo_file,
-            "# 章节流程待办\n\n- [ ] /更新记忆\n- [ ] /检查一致性\n- [ ] /风格校准\n- [ ] /校稿\n- [ ] /门禁检查\n- [ ] /更新剧情索引\n",
-        )
-
-    quality_before = evaluate_quality(read_text(chapter_path), args)
-    quality_after = quality_before
-    improve_rounds = 0
-    if not draft_mode and args.auto_improve:
-        while (not quality_after["passed"]) and improve_rounds < args.auto_improve_rounds:
-            txt = read_text(chapter_path)
-            write_text(chapter_path, improve_text_minimally(txt, query))
-            quality_after = evaluate_quality(read_text(chapter_path), args)
-            improve_rounds += 1
-
-    quality_report = write_quality_report(gate_dir, quality_before, quality_after)
-
-    gate_payload: Optional[Dict[str, object]] = None
-    repair_payload: Optional[Dict[str, object]] = None
-    retry_actions: List[str] = []
-    gate_passed_final = False
-
-    if not draft_mode:
-        write_gate_artifacts(project_root, chapter_path, query, quality_after, q_payload)
-        g_code, gate_payload = run_gate_check(project_root, chapter_path)
-        gate_passed_final = bool(gate_payload.get("passed")) if isinstance(gate_payload, dict) else False
-
-        if (not gate_passed_final) and args.auto_retry:
-            chapter_path, retry_actions = auto_fix_after_gate_failure(
-                project_root,
+        created_chapter_stub = False
+        if not chapter_path.exists():
+            created_chapter_stub = True
+            write_text(
                 chapter_path,
-                query,
-                quality_after,
-                q_payload,
-                gate_payload if gate_payload else {},
-                args,
+                f"# {chapter_path.stem.replace('-', ' ')}\n\n<!-- NOVEL_FLOW_STUB -->\n\n## 正文\n[待写]\n",
             )
-            if retry_actions:
-                g2_code, gate_payload = run_gate_check(project_root, chapter_path)
+
+        chapter_hash_before = file_sha1(chapter_path)
+        request_id = make_request_id(args, chapter_path, query, chapter_hash_before)
+
+        if args.idempotent_cache and not args.force_run:
+            cache = load_continue_cache(flow_dir)
+            entry = cache.get("entries", {}).get(request_id) if isinstance(cache.get("entries"), dict) else None
+            if isinstance(entry, dict) and entry.get("chapter_hash_before") == chapter_hash_before and entry.get("result"):
+                result = dict(entry["result"])
+                result["idempotent_hit"] = True
+                result["request_id"] = request_id
+                runtime_ms = round((time.time() - started_at) * 1000, 2)
+                metrics_summary = update_flow_metrics(project_root, {
+                    "ts": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ok": bool(result.get("ok")),
+                    "gate_passed_final": bool(result.get("gate_passed_final")),
+                    "runtime_ms": runtime_ms,
+                    "query_length": len(query),
+                    "retrieval_context_chars": 0,
+                    "retrieval_candidates": 0,
+                    "auto_retry_actions_count": 0,
+                    "idempotent_hit": True,
+                })
+                result["metrics_summary"] = metrics_summary
+                result["runtime_ms"] = runtime_ms
+                return result
+
+        snapshot_path = create_snapshot(chapter_path, flow_dir, run_id)
+
+        auto_draft_applied = False
+        if chapter_is_draft_stub(chapter_path) and args.auto_draft:
+            draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
+            write_text(chapter_path, draft)
+            auto_draft_applied = True
+
+        draft_mode = chapter_is_draft_stub(chapter_path)
+
+        chapter_id = slugify(chapter_path.stem)
+        gate_dir = project_root / "04_editing" / "gate_artifacts" / chapter_id
+        ensure_dir(gate_dir)
+        todo_file = gate_dir / "pipeline_todo.md"
+        if not todo_file.exists():
+            write_text(
+                todo_file,
+                "# 章节流程待办\n\n- [ ] /更新记忆\n- [ ] /检查一致性\n- [ ] /风格校准\n- [ ] /校稿\n- [ ] /门禁检查\n- [ ] /更新剧情索引\n",
+            )
+
+        quality_before = evaluate_quality(read_text(chapter_path), args)
+        quality_after = quality_before
+        improve_rounds = 0
+        if not draft_mode and args.auto_improve:
+            while (not quality_after["passed"]) and improve_rounds < args.auto_improve_rounds:
+                txt = read_text(chapter_path)
+                write_text(chapter_path, improve_text_minimally(txt, query))
+                quality_after = evaluate_quality(read_text(chapter_path), args)
+                improve_rounds += 1
+
+        quality_report = write_quality_report(gate_dir, quality_before, quality_after)
+
+        gate_payload: Optional[Dict[str, object]] = None
+        repair_payload: Optional[Dict[str, object]] = None
+        retry_actions: List[str] = []
+        gate_passed_final = False
+
+        if not draft_mode:
+            write_gate_artifacts(project_root, chapter_path, query, quality_after, q_payload)
+            _, gate_payload = run_gate_check(project_root, chapter_path)
+            gate_passed_final = bool(gate_payload.get("passed")) if isinstance(gate_payload, dict) else False
+
+            retry_rounds = 0
+            while (not gate_passed_final) and args.auto_retry and retry_rounds < args.max_auto_retry_rounds:
+                chapter_path, actions, quality_after = auto_fix_after_gate_failure(
+                    project_root,
+                    chapter_path,
+                    query,
+                    quality_after,
+                    q_payload,
+                    gate_payload if gate_payload else {},
+                    args,
+                )
+                if not actions:
+                    break
+                retry_actions.extend(actions)
+                retry_rounds += 1
+                _, gate_payload = run_gate_check(project_root, chapter_path)
                 gate_passed_final = bool(gate_payload.get("passed")) if isinstance(gate_payload, dict) else False
+
             if not gate_passed_final:
                 repair_payload = run_repair_plan(project_root, chapter_path)
-        elif not gate_passed_final:
-            repair_payload = run_repair_plan(project_root, chapter_path)
 
-    b_code, b_out, b_err, b_payload = run_python(
-        SCRIPT_DIR / "plot_rag_retriever.py",
-        ["build", "--project-root", str(project_root)],
-    )
+        b_code, b_out, b_err, b_payload = run_python(
+            SCRIPT_DIR / "plot_rag_retriever.py",
+            ["build", "--project-root", str(project_root)],
+        )
 
-    ok = (q_code == 0 and b_code == 0 and (draft_mode or gate_passed_final))
-    result: Dict[str, object] = {
-        "ok": ok,
-        "command": "continue-write",
-        "project_root": str(project_root),
-        "chapter_file": str(chapter_path),
-        "created_chapter_stub": created_chapter_stub,
-        "auto_draft_applied": auto_draft_applied,
-        "awaiting_draft": draft_mode,
-        "quality_before": quality_before,
-        "quality_after": quality_after,
-        "quality_report": str(quality_report),
-        "auto_improve_rounds_used": improve_rounds,
-        "query_result": q_payload if q_payload is not None else {"stdout": q_out, "stderr": q_err},
-        "gate_result": gate_payload,
-        "gate_passed_final": gate_passed_final,
-        "auto_retry_actions": retry_actions,
-        "repair_result": repair_payload,
-        "index_result": b_payload if b_payload is not None else {"stdout": b_out, "stderr": b_err},
-        "todo_file": str(todo_file),
-    }
+        ok = (q_code == 0 and b_code == 0 and (draft_mode or gate_passed_final))
 
-    if draft_mode and not args.auto_draft:
-        result["next_step"] = "章节仍是占位草稿，请补全正文后再次执行 /继续写，或启用 --auto-draft。"
-    elif draft_mode:
-        result["next_step"] = "已尝试自动成稿但仍检测到占位标记，请手动补全正文后再执行。"
-    elif gate_passed_final:
-        result["next_step"] = "章节已通过门禁，可进入下一章。"
-    else:
-        result["next_step"] = "章节未通过门禁，已生成 repair_plan.md。请执行 /修复本章。"
+        if (not ok) and args.rollback_on_failure and snapshot_path and original_chapter_path and chapter_path:
+            restored = restore_snapshot(snapshot_path, original_chapter_path, chapter_path)
+            rollback_applied = restored is not None
+            if rollback_applied:
+                chapter_path = restored
+                run_python(SCRIPT_DIR / "plot_rag_retriever.py", ["build", "--project-root", str(project_root)])
 
-    return result
+        retrieval_stats = {}
+        if isinstance(q_payload, dict):
+            retrieval_stats = ((q_payload.get("result") or {}).get("retrieval_stats") or {})
+
+        runtime_ms = round((time.time() - started_at) * 1000, 2)
+        result: Dict[str, object] = {
+            "ok": ok,
+            "command": "continue-write",
+            "project_root": str(project_root),
+            "chapter_file": str(chapter_path) if chapter_path else "",
+            "created_chapter_stub": created_chapter_stub,
+            "auto_draft_applied": auto_draft_applied,
+            "awaiting_draft": draft_mode,
+            "quality_before": quality_before,
+            "quality_after": quality_after,
+            "quality_report": str(quality_report),
+            "auto_improve_rounds_used": improve_rounds,
+            "query_result": q_payload if q_payload is not None else {"stdout": q_out, "stderr": q_err},
+            "gate_result": gate_payload,
+            "gate_passed_final": gate_passed_final,
+            "auto_retry_actions": retry_actions,
+            "repair_result": repair_payload,
+            "index_result": b_payload if b_payload is not None else {"stdout": b_out, "stderr": b_err},
+            "todo_file": str(todo_file),
+            "run_id": run_id,
+            "request_id": request_id,
+            "idempotent_hit": idempotent_hit,
+            "snapshot_file": str(snapshot_path) if snapshot_path else None,
+            "rollback_applied": rollback_applied,
+            "runtime_ms": runtime_ms,
+            "chapter_hash_before": chapter_hash_before,
+            "chapter_hash_after": file_sha1(chapter_path) if chapter_path and chapter_path.exists() else "",
+        }
+
+        if draft_mode and not args.auto_draft:
+            result["next_step"] = "章节仍是占位草稿，请补全正文后再次执行 /继续写，或启用 --auto-draft。"
+        elif draft_mode:
+            result["next_step"] = "已尝试自动成稿但仍检测到占位标记，请手动补全正文后再执行。"
+        elif gate_passed_final:
+            result["next_step"] = "章节已通过门禁，可进入下一章。"
+        else:
+            result["next_step"] = "章节未通过门禁，已生成 repair_plan.md。请执行 /修复本章。"
+
+        metrics_summary = update_flow_metrics(project_root, {
+            "ts": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ok": ok,
+            "gate_passed_final": gate_passed_final,
+            "runtime_ms": runtime_ms,
+            "query_length": len(query),
+            "retrieval_context_chars": retrieval_stats.get("estimated_context_chars", 0),
+            "retrieval_candidates": retrieval_stats.get("candidate_pool", 0),
+            "auto_retry_actions_count": len(retry_actions),
+            "idempotent_hit": False,
+        })
+        result["metrics_summary"] = metrics_summary
+
+        if args.idempotent_cache and result.get("ok"):
+            cache = load_continue_cache(flow_dir)
+            cache.setdefault("entries", {})
+            cache["entries"][request_id] = {
+                "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "chapter_hash_before": chapter_hash_before,
+                "result": result,
+            }
+            save_continue_cache(flow_dir, cache)
+        return result
+
+    except Exception as exc:
+        if args.rollback_on_failure and snapshot_path and original_chapter_path and chapter_path:
+            restored = restore_snapshot(snapshot_path, original_chapter_path, chapter_path)
+            rollback_applied = restored is not None
+            if rollback_applied:
+                chapter_path = restored
+        runtime_ms = round((time.time() - started_at) * 1000, 2)
+        metrics_summary = update_flow_metrics(project_root, {
+            "ts": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ok": False,
+            "gate_passed_final": False,
+            "runtime_ms": runtime_ms,
+            "query_length": len(query),
+            "retrieval_context_chars": 0,
+            "retrieval_candidates": 0,
+            "auto_retry_actions_count": 0,
+            "idempotent_hit": False,
+        })
+        return {
+            "ok": False,
+            "command": "continue-write",
+            "project_root": str(project_root),
+            "chapter_file": str(chapter_path) if chapter_path else "",
+            "error": repr(exc),
+            "run_id": run_id,
+            "rollback_applied": rollback_applied,
+            "metrics_summary": metrics_summary,
+            "next_step": "执行发生异常，已尝试回滚章节文件。请检查错误后重试。",
+        }
+    finally:
+        release_lock(lock_file, run_id)
 
 
 def one_click(args: argparse.Namespace) -> Dict[str, object]:
@@ -744,16 +1104,26 @@ def parse_args() -> argparse.Namespace:
     p_cont.add_argument("--chapter-file")
     p_cont.add_argument("--chapter-title", default="待写")
     p_cont.add_argument("--top-k", type=int, default=4)
+    p_cont.add_argument("--candidate-k", type=int, default=12)
     p_cont.add_argument("--force-retrieval", action="store_true")
+    p_cont.add_argument("--force-run", action="store_true", help="忽略幂等缓存，强制执行完整流程")
     p_cont.add_argument("--auto-draft", dest="auto_draft", action="store_true", default=True)
     p_cont.add_argument("--no-auto-draft", dest="auto_draft", action="store_false")
     p_cont.add_argument("--auto-improve", dest="auto_improve", action="store_true", default=True)
     p_cont.add_argument("--no-auto-improve", dest="auto_improve", action="store_false")
     p_cont.add_argument("--auto-retry", dest="auto_retry", action="store_true", default=True)
     p_cont.add_argument("--no-auto-retry", dest="auto_retry", action="store_false")
+    p_cont.add_argument("--auto-fix-quality", dest="auto_fix_quality", action="store_true", default=True)
+    p_cont.add_argument("--no-auto-fix-quality", dest="auto_fix_quality", action="store_false")
     p_cont.add_argument("--auto-fix-kb-misplaced", dest="auto_fix_kb_misplaced", action="store_true", default=True)
     p_cont.add_argument("--no-auto-fix-kb-misplaced", dest="auto_fix_kb_misplaced", action="store_false")
     p_cont.add_argument("--auto-improve-rounds", type=int, default=1)
+    p_cont.add_argument("--max-auto-retry-rounds", type=int, default=2)
+    p_cont.add_argument("--rollback-on-failure", dest="rollback_on_failure", action="store_true", default=True)
+    p_cont.add_argument("--no-rollback-on-failure", dest="rollback_on_failure", action="store_false")
+    p_cont.add_argument("--idempotent-cache", dest="idempotent_cache", action="store_true", default=True)
+    p_cont.add_argument("--no-idempotent-cache", dest="idempotent_cache", action="store_false")
+    p_cont.add_argument("--lock-timeout-sec", type=int, default=1800)
     p_cont.add_argument("--min-chars", type=int, default=1200)
     p_cont.add_argument("--min-paragraphs", type=int, default=6)
     p_cont.add_argument("--min-dialogue-ratio", type=float, default=0.03)

@@ -15,6 +15,7 @@
 
 ## 方案原则（参考检索最佳实践）
 1. 元数据过滤：按角色命中、章节号、关键词重叠做筛选。
+1.1 两级检索：先粗筛候选池（低成本），再精排 Top-K（高精度）。
 2. 小检索集：默认 Top-K=4，避免上下文过载。
 3. 索引增量更新：每章后更新一次索引。
 4. 条件触发：轻场景自动跳过检索，复杂剧情再检索。
@@ -27,6 +28,7 @@
 - 索引脚本：`scripts/plot_rag_retriever.py`
 - 索引文件：`00_memory/retrieval/story_index.json`
 - 实体映射：`00_memory/retrieval/entity_chapter_map.json`
+- 章节元数据侧车：`00_memory/retrieval/chapter_meta/*.meta.json`
 - 写作前上下文建议：`00_memory/retrieval/next_plot_context.md`
 
 ## 推荐使用方式

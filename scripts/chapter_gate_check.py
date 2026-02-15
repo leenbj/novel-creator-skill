@@ -31,6 +31,7 @@ def required_artifacts(gate_dir: Path) -> Dict[str, Path]:
         "style_calibration": gate_dir / "style_calibration.md",
         "copyedit_report": gate_dir / "copyedit_report.md",
         "publish_ready": gate_dir / "publish_ready.md",
+        "quality_report": gate_dir / "quality_report.md",
     }
 
 
@@ -76,6 +77,16 @@ def check_publish_ready(path: Path, keywords: List[str]) -> Tuple[bool, str]:
         if kw in txt:
             return True, f"命中发布关键字: {kw}"
     return False, "未命中发布关键字（默认要求：可发布/通过/PASS）"
+
+
+def check_quality_report(path: Path) -> Tuple[bool, str]:
+    txt = path.read_text(encoding="utf-8", errors="ignore")
+    m = re.search(r"通过：\s*(True|False)", txt)
+    if not m:
+        return False, "quality_report 缺少“通过：True/False”结论"
+    if m.group(1) != "True":
+        return False, "quality_report 显示未通过"
+    return True, "通过"
 
 
 def parse_args() -> argparse.Namespace:
@@ -174,6 +185,19 @@ def main() -> int:
         result["checks"].append(item)
         if not ok:
             result["failures"].append(f"publish_ready_keyword: {msg}")
+
+    quality_path = artifacts["quality_report"]
+    if quality_path.exists() and quality_path.stat().st_size >= args.min_bytes:
+        ok, msg = check_quality_report(quality_path)
+        item = {
+            "name": "quality_baseline",
+            "path": str(quality_path),
+            "ok": ok,
+            "message": msg,
+        }
+        result["checks"].append(item)
+        if not ok:
+            result["failures"].append(f"quality_baseline: {msg}")
 
     result["passed"] = len(result["failures"]) == 0
 

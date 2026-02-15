@@ -28,7 +28,8 @@
 - 输出：自动完成“检索→写作→门禁→索引更新”。
 - 自动流程：`/剧情检索`（条件触发）→ `/写作` → `/更新记忆` → `/检查一致性` → `/风格校准` → `/校稿` → `/门禁检查` → `/更新剧情索引`。
 - 执行：`python3 scripts/novel_flow_executor.py continue-write --project-root <项目目录> --query "<新剧情>"`
-- 说明：若章节仍是占位草稿，会先生成待办并等待正文完成；若章节已成稿会自动触发门禁与修复联动。
+- 进阶执行：`python3 scripts/novel_flow_executor.py continue-write --project-root <项目目录> --query "<新剧情>" --candidate-k 12 --max-auto-retry-rounds 2 --rollback-on-failure --idempotent-cache`
+- 说明：默认启用执行锁、幂等缓存、写前快照、失败回滚；若章节已成稿会自动触发门禁与最小修复联动。
 
 `/修复本章`
 - 输入：项目目录 + 章节文件。
@@ -45,10 +46,11 @@
 
 `/剧情检索`
 - 输入：当前准备写的新剧情描述（冲突、人物、事件目标）。
-- 执行：`python3 scripts/plot_rag_retriever.py query --project-root <项目目录> --query "<新剧情>" --top-k 4 --auto-build`
+- 执行：`python3 scripts/plot_rag_retriever.py query --project-root <项目目录> --query "<新剧情>" --top-k 4 --candidate-k 12 --auto-build`
 - 默认行为：条件触发（轻场景自动跳过）、片段级召回、查询缓存。
 - 常用参数：`--force`（强制检索）、`--no-cache`（禁用缓存）、`--no-conditional`（每次都检索）。
 - 输出：`00_memory/retrieval/next_plot_context.md`（建议回读章节 + 关键片段 + 角色关系片段）。
+- 补充产物：`00_memory/retrieval/chapter_meta/*.meta.json`（章节 sidecar 元数据）。
 
 `/写作`
 - 输入：章节目标、冲突、人物、上章结尾。
@@ -117,7 +119,14 @@
 - 输入：项目目录 + 章节文件。
 - 执行：`python3 scripts/chapter_gate_check.py --project-root <项目目录> --chapter-file <章节文件>`
 - 输出：通过/失败结果（同时校验章节必须在 `03_manuscript/` 且为 `.md`，并检查知识库目录没有混入章节文件）。
+- 新增硬校验：`quality_report.md` 必须存在且结论为 `通过：True`。
 - 产物：`04_editing/gate_artifacts/<chapter_id>/gate_result.json`
+
+## 7. 评测基线
+`/评测基线`（脚本入口）
+- 输入：项目目录、评测轮数。
+- 执行：`python3 scripts/benchmark_novel_flow.py --project-root <项目目录> --rounds 5`
+- 输出：`00_memory/retrieval/eval_baseline.json`（包含 ok_rate、gate_pass_rate、retry_rate、avg_runtime_ms、avg_retrieval_context_chars 等指标）。
 
 ## 5. 风格系统命令
 `/风格提取`

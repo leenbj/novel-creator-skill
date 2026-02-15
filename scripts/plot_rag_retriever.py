@@ -30,6 +30,11 @@ LIGHT_SCENE_KEYWORDS = {
 }
 
 
+def slugify(text: str) -> str:
+    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "-", text).strip("-")
+    return s or "chapter"
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -193,6 +198,75 @@ def split_passages(text: str, max_chars: int = 360) -> List[str]:
     return passages
 
 
+def extract_location_candidates(text: str, top_n: int = 6) -> List[str]:
+    # 轻量地点抽取：匹配“在X/到X/从X”及“X站/港/城/街/村/馆”等后缀。
+    hits = []
+    for m in re.finditer(r"(?:在|到|从|回到)([\u4e00-\u9fff]{2,12}(?:站台|车站|港区|港|城|城北|街|巷|村|楼|馆|厂|桥|学校|医院))", text):
+        hits.append(m.group(1))
+    for m in re.finditer(r"([\u4e00-\u9fff]{2,10}(?:站台|车站|港区|港|城|街|巷|村|楼|馆|厂|桥|学校|医院))", text):
+        hits.append(m.group(1))
+    if not hits:
+        return []
+    counter = Counter(hits)
+    return [x for x, _ in counter.most_common(top_n)]
+
+
+def infer_conflict_level(text: str) -> str:
+    high = {"决战", "追杀", "爆炸", "死亡", "复活", "背叛", "崩溃", "危机", "反转"}
+    medium = {"冲突", "争执", "对峙", "潜入", "调查", "追踪", "怀疑", "联盟"}
+    low = {"日常", "休整", "过渡", "闲聊", "铺垫"}
+    if any(k in text for k in high):
+        return "high"
+    if any(k in text for k in medium):
+        return "medium"
+    if any(k in text for k in low):
+        return "low"
+    return "unknown"
+
+
+def build_chapter_meta(
+    chapter_path: Path,
+    text: str,
+    chapter_no: int,
+    names: List[str],
+    retrieval_dir: Path,
+) -> Dict[str, object]:
+    entities = sorted([n for n in names if n in text])
+    tokens = tokenize(text)
+    top_tokens = [k for k, _ in Counter(tokens).most_common(18)]
+    events = [k for k in TRIGGER_KEYWORDS if k in text][:10]
+    locations = extract_location_candidates(text, top_n=6)
+    foreshadow_refs = []
+    for m in re.finditer(r"(伏笔|线索|坐标|编号|暗号|名单)[^。！？\n]{0,32}", text):
+        frag = normalize_text(m.group(0))
+        if frag and frag not in foreshadow_refs:
+            foreshadow_refs.append(frag)
+        if len(foreshadow_refs) >= 6:
+            break
+
+    meta_dir = retrieval_dir / "chapter_meta"
+    ensure_dir(meta_dir)
+    meta_path = meta_dir / f"{slugify(chapter_path.stem)}.meta.json"
+
+    flat = re.sub(r"\s+", " ", text).strip()
+    meta = {
+        "chapter_file": chapter_path.name,
+        "chapter_path": str(chapter_path),
+        "chapter_no": chapter_no,
+        "mtime": chapter_path.stat().st_mtime,
+        "summary": flat[:220],
+        "entities": entities,
+        "events": events,
+        "locations": locations,
+        "foreshadow_refs": foreshadow_refs,
+        "keywords": top_tokens,
+        "conflict_level": infer_conflict_level(text),
+        "meta_file": str(meta_path),
+    }
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return meta
+
+
 def score_passage(passage: str, query_tokens: List[str], query_entities: List[str]) -> Tuple[float, Dict[str, int]]:
     p_tokens = set(tokenize(passage))
     token_overlap = len(set(query_tokens) & p_tokens)
@@ -270,6 +344,23 @@ def make_cache_key(query: str, top_k: int, per_chapter: int, passage_max_chars: 
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def cleanup_stale_meta_files(retrieval_dir: Path, docs: List[Dict[str, object]]) -> int:
+    meta_dir = retrieval_dir / "chapter_meta"
+    if not meta_dir.exists():
+        return 0
+    valid_files = set()
+    for d in docs:
+        mf = d.get("meta_file")
+        if isinstance(mf, str) and mf:
+            valid_files.add(Path(mf).resolve())
+    removed = 0
+    for p in meta_dir.glob("*.meta.json"):
+        if p.resolve() not in valid_files:
+            p.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def build_index(project_root: Path, keyword_top_n: int = 20, incremental: bool = True) -> Dict[str, object]:
     manuscript_dir = project_root / "03_manuscript"
     retrieval_dir = project_root / "00_memory" / "retrieval"
@@ -280,15 +371,20 @@ def build_index(project_root: Path, keyword_top_n: int = 20, incremental: bool =
     names = load_character_names(project_root)
 
     existing_docs: Dict[str, Dict[str, object]] = {}
+    old_character_sig = ""
     if incremental and index_file.exists():
         try:
             old = json.loads(index_file.read_text(encoding="utf-8"))
+            old_character_sig = str(old.get("character_sig", ""))
             for d in old.get("docs", []):
                 chapter_file = str(d.get("chapter_file", ""))
                 if chapter_file:
                     existing_docs[chapter_file] = d
         except Exception:
             existing_docs = {}
+
+    character_sig = hashlib.sha1(("|".join(names)).encode("utf-8")).hexdigest()[:16]
+    reuse_allowed = (old_character_sig == character_sig) if old_character_sig else True
 
     docs = []
     reused_docs = 0
@@ -297,8 +393,25 @@ def build_index(project_root: Path, keyword_top_n: int = 20, incremental: bool =
     for path in chapters:
         mtime = path.stat().st_mtime
         cached = existing_docs.get(path.name)
-        if cached and float(cached.get("mtime", -1)) == mtime:
+        if reuse_allowed and cached and float(cached.get("mtime", -1)) == mtime:
             doc = cached
+            meta_file = doc.get("meta_file")
+            if not meta_file or not Path(str(meta_file)).exists():
+                text = read_text(path)
+                meta = build_chapter_meta(
+                    chapter_path=path,
+                    text=text,
+                    chapter_no=parse_chapter_no(path.name),
+                    names=names,
+                    retrieval_dir=retrieval_dir,
+                )
+                doc.update({
+                    "meta_file": meta.get("meta_file"),
+                    "events": meta.get("events", []),
+                    "locations": meta.get("locations", []),
+                    "foreshadow_refs": meta.get("foreshadow_refs", []),
+                    "conflict_level": meta.get("conflict_level", "unknown"),
+                })
             reused_docs += 1
         else:
             text = read_text(path)
@@ -309,6 +422,13 @@ def build_index(project_root: Path, keyword_top_n: int = 20, incremental: bool =
             top_keywords = [k for k, _ in Counter(tokens).most_common(keyword_top_n)]
 
             hit_entities = [n for n in names if n in text]
+            meta = build_chapter_meta(
+                chapter_path=path,
+                text=text,
+                chapter_no=parse_chapter_no(path.name),
+                names=names,
+                retrieval_dir=retrieval_dir,
+            )
             doc = {
                 "chapter_file": path.name,
                 "chapter_path": str(path),
@@ -317,6 +437,11 @@ def build_index(project_root: Path, keyword_top_n: int = 20, incremental: bool =
                 "summary": summary,
                 "entities": hit_entities,
                 "keywords": top_keywords,
+                "meta_file": meta.get("meta_file"),
+                "events": meta.get("events", []),
+                "locations": meta.get("locations", []),
+                "foreshadow_refs": meta.get("foreshadow_refs", []),
+                "conflict_level": meta.get("conflict_level", "unknown"),
             }
             rebuilt_docs += 1
         docs.append(doc)
@@ -327,6 +452,7 @@ def build_index(project_root: Path, keyword_top_n: int = 20, incremental: bool =
         chapter_file = str(d.get("chapter_file", ""))
         for n in d.get("entities", []):
             entity_map.setdefault(n, []).append(chapter_file)
+    cleaned_meta_files = cleanup_stale_meta_files(retrieval_dir, docs)
 
     index = {
         "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -334,6 +460,8 @@ def build_index(project_root: Path, keyword_top_n: int = 20, incremental: bool =
         "chapter_count": len(docs),
         "reused_docs": reused_docs,
         "rebuilt_docs": rebuilt_docs,
+        "cleaned_meta_files": cleaned_meta_files,
+        "character_sig": character_sig,
         "docs": docs,
     }
 
@@ -343,21 +471,70 @@ def build_index(project_root: Path, keyword_top_n: int = 20, incremental: bool =
     return index
 
 
-def score_doc(doc: Dict[str, object], query_tokens: List[str], query_entities: List[str], max_no: int) -> Tuple[float, Dict[str, object]]:
+def score_doc_coarse(
+    doc: Dict[str, object],
+    query_tokens: List[str],
+    query_token_set: set,
+    query_entities: List[str],
+    query_text: str,
+) -> Tuple[float, Dict[str, object]]:
     kw = set(doc.get("keywords", []))
     ent = set(doc.get("entities", []))
+    evt = set(doc.get("events", []))
+    loc = set(doc.get("locations", []))
 
-    token_overlap = len(set(query_tokens) & kw)
+    token_overlap = len(query_token_set & kw)
     entity_overlap = len(set(query_entities) & ent)
+    event_overlap = sum(1 for e in evt if e and e in query_text)
+    location_overlap = sum(1 for l in loc if l and l in query_text)
 
-    chapter_no = int(doc.get("chapter_no", 0))
-    recency = (chapter_no / max_no) if max_no > 0 else 0.0
-
-    score = entity_overlap * 3.0 + token_overlap * 1.0 + recency * 0.2
+    score = entity_overlap * 4.0 + event_overlap * 2.0 + location_overlap * 1.5 + token_overlap * 1.0
     reason = {
         "token_overlap": token_overlap,
         "entity_overlap": entity_overlap,
+        "event_overlap": event_overlap,
+        "location_overlap": location_overlap,
+    }
+    return score, reason
+
+
+def score_doc_fine(
+    doc: Dict[str, object],
+    query_tokens: List[str],
+    query_token_set: set,
+    query_entities: List[str],
+    query_text: str,
+    max_no: int,
+) -> Tuple[float, Dict[str, object]]:
+    kw = set(doc.get("keywords", []))
+    ent = set(doc.get("entities", []))
+    evt = set(doc.get("events", []))
+    summary = str(doc.get("summary", ""))
+
+    token_overlap = len(query_token_set & kw)
+    summary_overlap = len(query_token_set & set(tokenize(summary)))
+    entity_overlap = len(set(query_entities) & ent)
+    event_overlap = sum(1 for e in evt if e and e in query_text)
+
+    chapter_no = int(doc.get("chapter_no", 0))
+    recency = (chapter_no / max_no) if max_no > 0 else 0.0
+    conflict_bonus = 0.2 if doc.get("conflict_level") in {"high", "medium"} else 0.0
+
+    score = (
+        entity_overlap * 3.0
+        + event_overlap * 1.8
+        + token_overlap * 1.0
+        + summary_overlap * 0.6
+        + recency * 0.3
+        + conflict_bonus
+    )
+    reason = {
+        "token_overlap": token_overlap,
+        "summary_overlap": summary_overlap,
+        "entity_overlap": entity_overlap,
+        "event_overlap": event_overlap,
         "recency": round(recency, 3),
+        "conflict_bonus": conflict_bonus,
     }
     return score, reason
 
@@ -367,51 +544,76 @@ def retrieve(
     project_root: Path,
     query: str,
     top_k: int,
+    candidate_k: int,
     per_chapter: int,
     passage_max_chars: int,
 ) -> Dict[str, object]:
     docs = index.get("docs", [])
     query_tokens = tokenize(query)
+    query_token_set = set(query_tokens)
     names = load_character_names(project_root)
     query_entities = [n for n in names if n in query]
 
     max_no = max((int(d.get("chapter_no", 0)) for d in docs), default=0)
-    scored = []
+    coarse_scored = []
     for d in docs:
-        s, reason = score_doc(d, query_tokens, query_entities, max_no)
-        scored.append((s, reason, d))
+        s, reason = score_doc_coarse(d, query_tokens, query_token_set, query_entities, query)
+        coarse_scored.append((s, reason, d))
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    picked = [x for x in scored if x[0] > 0][:top_k]
+    coarse_scored.sort(key=lambda x: x[0], reverse=True)
+    candidate_pool = [x for x in coarse_scored if x[0] > 0][:candidate_k]
+    if not candidate_pool:
+        candidate_pool = coarse_scored[: min(candidate_k, len(coarse_scored))]
+
+    fine_scored = []
+    for _, _, d in candidate_pool:
+        s, reason = score_doc_fine(d, query_tokens, query_token_set, query_entities, query, max_no)
+        fine_scored.append((s, reason, d))
+    fine_scored.sort(key=lambda x: x[0], reverse=True)
+
+    picked = [x for x in fine_scored if x[0] > 0][:top_k]
     if not picked:
-        picked = scored[: min(top_k, len(scored))]
+        picked = fine_scored[: min(top_k, len(fine_scored))]
 
     character_tracker = project_root / "00_memory" / "character_tracker.md"
     relation_snippets = extract_relation_snippets(character_tracker, query_entities)
+
+    total_chars = 0
+    retrieved = []
+    for s, reason, d in picked:
+        passages = top_passages(
+            Path(str(d.get("chapter_path", ""))),
+            query_tokens,
+            query_entities,
+            per_chapter=per_chapter,
+            passage_max_chars=passage_max_chars,
+        )
+        total_chars += sum(len(str(p.get("text", ""))) for p in passages)
+        retrieved.append({
+            "score": round(s, 3),
+            "reason": reason,
+            "chapter_file": d.get("chapter_file"),
+            "chapter_path": d.get("chapter_path"),
+            "summary": d.get("summary", ""),
+            "entities": d.get("entities", []),
+            "events": d.get("events", []),
+            "locations": d.get("locations", []),
+            "foreshadow_refs": d.get("foreshadow_refs", []),
+            "passages": passages,
+        })
 
     return {
         "query": query,
         "query_entities": query_entities,
         "index_signature": index_signature(index),
-        "retrieved": [
-            {
-                "score": round(s, 3),
-                "reason": reason,
-                "chapter_file": d.get("chapter_file"),
-                "chapter_path": d.get("chapter_path"),
-                "summary": d.get("summary", ""),
-                "entities": d.get("entities", []),
-                "passages": top_passages(
-                    Path(str(d.get("chapter_path", ""))),
-                    query_tokens,
-                    query_entities,
-                    per_chapter=per_chapter,
-                    passage_max_chars=passage_max_chars,
-                ),
-            }
-            for s, reason, d in picked
-        ],
+        "retrieved": retrieved,
         "relation_snippets": relation_snippets,
+        "retrieval_stats": {
+            "docs_total": len(docs),
+            "candidate_pool": len(candidate_pool),
+            "rerank_topk": len(retrieved),
+            "estimated_context_chars": total_chars,
+        },
     }
 
 
@@ -430,6 +632,15 @@ def write_context_md(project_root: Path, result: Dict[str, object]) -> Path:
         lines.append("- 缓存命中：是（复用历史检索结果）")
     if result.get("skipped"):
         lines.append(f"- 条件触发：跳过（{'; '.join(result.get('trigger_reason', []))}）")
+    stats = result.get("retrieval_stats", {})
+    if stats:
+        lines.append(
+            "- 检索统计：候选池={candidate_pool} / 总文档={docs_total} / 估算上下文字符={estimated_context_chars}".format(
+                candidate_pool=stats.get("candidate_pool", 0),
+                docs_total=stats.get("docs_total", 0),
+                estimated_context_chars=stats.get("estimated_context_chars", 0),
+            )
+        )
     lines.append("")
     lines.append("## 建议先读（固定）")
     lines.append("- 00_memory/novel_plan.md")
@@ -450,6 +661,15 @@ def write_context_md(project_root: Path, result: Dict[str, object]) -> Path:
         for i, r in enumerate(retrieved, 1):
             lines.append(f"{i}. `{r['chapter_file']}` | score={r['score']} | 命中={r['reason']}")
             lines.append(f"   摘要：{r['summary']}")
+            meta_bits = []
+            if r.get("events"):
+                meta_bits.append("事件=" + ",".join(r["events"][:4]))
+            if r.get("locations"):
+                meta_bits.append("地点=" + ",".join(r["locations"][:3]))
+            if r.get("foreshadow_refs"):
+                meta_bits.append("伏笔=" + " / ".join(r["foreshadow_refs"][:2]))
+            if meta_bits:
+                lines.append("   元数据：" + "；".join(meta_bits))
             passages = r.get("passages", [])
             if passages:
                 lines.append("   关键片段：")
@@ -494,6 +714,7 @@ def parse_args() -> argparse.Namespace:
     p_query.add_argument("--auto-build", action="store_true")
     p_query.add_argument("--full-rebuild", action="store_true", help="与 --auto-build 联用时强制全量重建")
     p_query.add_argument("--passages-per-chapter", type=int, default=2, help="每章返回片段数量")
+    p_query.add_argument("--candidate-k", type=int, default=12, help="粗筛候选池大小（两级检索第一阶段）")
     p_query.add_argument("--passage-max-chars", type=int, default=220, help="单片段最大字符数")
     p_query.add_argument("--conditional", dest="conditional", action="store_true", default=True, help="启用条件触发，轻场景跳过检索")
     p_query.add_argument("--no-conditional", dest="conditional", action="store_false", help="关闭条件触发，每次都检索")
@@ -566,7 +787,7 @@ def main() -> int:
         args.top_k,
         args.passages_per_chapter,
         args.passage_max_chars,
-        idx_sig,
+        f"{idx_sig}|cand={args.candidate_k}",
     )
 
     if args.use_cache:
@@ -595,6 +816,7 @@ def main() -> int:
         project_root,
         args.query,
         args.top_k,
+        candidate_k=max(args.top_k, args.candidate_k),
         per_chapter=args.passages_per_chapter,
         passage_max_chars=args.passage_max_chars,
     )

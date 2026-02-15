@@ -71,6 +71,11 @@ class TestNovelFlowExecutor(unittest.TestCase):
         self.assertFalse(payload.get("awaiting_draft"))
         self.assertTrue(payload.get("auto_draft_applied"))
         self.assertTrue(payload.get("gate_passed_final"))
+        meta_file = self.tmpdir / "00_memory" / "retrieval" / "chapter_meta" / "第2章-待写.meta.json"
+        self.assertTrue(meta_file.exists())
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        self.assertEqual(meta.get("chapter_file"), "第2章-待写.md")
+        self.assertIn("events", meta)
 
     def test_continue_write_auto_retry_fix_kb(self):
         run_cmd([
@@ -99,6 +104,122 @@ class TestNovelFlowExecutor(unittest.TestCase):
         actions = payload.get("auto_retry_actions", [])
         self.assertTrue(any("迁移误放章节" in x for x in actions))
         self.assertFalse(kb_bad.exists())
+
+    def test_continue_write_idempotent_cache_hit(self):
+        run_cmd([
+            "one-click",
+            "--project-root",
+            str(self.tmpdir),
+            "--title",
+            "雾港回声",
+            "--genre",
+            "悬疑",
+            "--idea",
+            "主角在旧港区发现失踪名单",
+        ])
+        _, p1 = run_cmd([
+            "continue-write",
+            "--project-root",
+            str(self.tmpdir),
+            "--query",
+            "主角在站台发现名单并与同伴发生冲突",
+        ])
+        _, p2 = run_cmd([
+            "continue-write",
+            "--project-root",
+            str(self.tmpdir),
+            "--chapter-file",
+            p1.get("chapter_file"),
+            "--query",
+            "主角在站台发现名单并与同伴发生冲突",
+        ])
+        _, p3 = run_cmd([
+            "continue-write",
+            "--project-root",
+            str(self.tmpdir),
+            "--chapter-file",
+            p1.get("chapter_file"),
+            "--query",
+            "主角在站台发现名单并与同伴发生冲突",
+        ])
+        self.assertTrue(p1.get("ok"))
+        self.assertTrue(p2.get("ok"))
+        self.assertTrue(p3.get("idempotent_hit"))
+
+    def test_continue_write_rollback_on_failure(self):
+        run_cmd([
+            "one-click",
+            "--project-root",
+            str(self.tmpdir),
+            "--title",
+            "雾港回声",
+            "--genre",
+            "悬疑",
+            "--idea",
+            "主角在旧港区发现失踪名单",
+        ])
+        chapter = self.tmpdir / "03_manuscript" / "第2章-短章.md"
+        chapter.write_text("# 第2章 短章\n\n这是一段极短正文。", encoding="utf-8")
+        before = chapter.read_text(encoding="utf-8")
+
+        _, payload = run_cmd([
+            "continue-write",
+            "--project-root",
+            str(self.tmpdir),
+            "--chapter-file",
+            str(chapter),
+            "--query",
+            "主角推进剧情",
+            "--no-auto-draft",
+            "--no-auto-improve",
+            "--no-auto-retry",
+            "--min-paragraphs",
+            "12",
+            "--force-run",
+        ])
+        self.assertFalse(payload.get("ok"))
+        self.assertTrue(payload.get("rollback_applied"))
+        after = chapter.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
+
+    def test_continue_write_auto_fix_quality_baseline(self):
+        run_cmd([
+            "one-click",
+            "--project-root",
+            str(self.tmpdir),
+            "--title",
+            "雾港回声",
+            "--genre",
+            "悬疑",
+            "--idea",
+            "主角在旧港区发现失踪名单",
+        ])
+        chapter = self.tmpdir / "03_manuscript" / "第2章-短章.md"
+        chapter.write_text("# 第2章 短章\n\n主角发现线索。", encoding="utf-8")
+
+        _, payload = run_cmd([
+            "continue-write",
+            "--project-root",
+            str(self.tmpdir),
+            "--chapter-file",
+            str(chapter),
+            "--query",
+            "主角继续调查并与同伴沟通",
+            "--no-auto-draft",
+            "--no-auto-improve",
+            "--auto-retry",
+            "--min-chars",
+            "300",
+            "--min-paragraphs",
+            "4",
+            "--min-sentences",
+            "4",
+            "--force-run",
+        ])
+        self.assertTrue(payload.get("ok"))
+        self.assertTrue(payload.get("gate_passed_final"))
+        actions = payload.get("auto_retry_actions", [])
+        self.assertTrue(any("质量最小修复" in x for x in actions))
 
 
 if __name__ == "__main__":
