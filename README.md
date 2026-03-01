@@ -1,4 +1,4 @@
-# Novel Creator Skill v7.2
+# Novel Creator Skill v8.0
 
 中文小说全流程创作技能，支持 Codex、Claude Code、OpenCode、Gemini CLI、Antigravity 直接安装使用。
 
@@ -7,13 +7,12 @@
 - 每章强制通过门禁流程，降低跑偏与 AI 味。
 - 支持样章风格提取、跨项目风格复用、题材风格引导。
 
-## v7.2 更新
+## v8.0 更新
 
-- 检索升级为“两级检索（粗筛+精排）”，并输出候选池与上下文开销统计。
-- 新增章节 sidecar 元数据：`00_memory/retrieval/chapter_meta/*.meta.json`。
-- `/继续写` 新增幂等缓存、执行锁、写前快照、失败回滚（可配置开关）。
-- 门禁新增质量基线校验（`quality_report` 必须通过），失败时自动最小修复并二次复检。
-- 新增可量化评测脚本：`scripts/benchmark_novel_flow.py`。
+- **通用联网调研**：新增 `research_agent.py`，支持 9 大题材自动关键词生成、知识缺口检测、资料自动分类存储。
+- **多 LLM 写作引擎**：新增 `novel_chapter_writer.py`，支持 OpenAI / Anthropic / Kimi / GLM / MiniMax / 本地模型 / 任意 OpenAI 兼容 API。
+- **一键写书**：新增 `auto_novel_writer.py`，全自动调度（调研→开书→循环写作→完成报告），支持断点续写和进度报告。
+- 保留 v7.2 全部功能：两级检索、幂等回滚、门禁质检、基线评测等。
 
 ## 项目结构
 
