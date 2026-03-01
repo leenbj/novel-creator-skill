@@ -18,7 +18,13 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
+
+from common import (
+    ensure_dir, read_text, write_text, slugify,
+    sha1_text, file_sha1, load_json, save_json,
+    chapter_no_from_name,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -42,19 +48,6 @@ FLOW_SNAPSHOT_DIR = "snapshots"
 FLOW_CACHE_MAX_ENTRIES = 200
 
 
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="ignore")
-
-
-def write_text(path: Path, content: str) -> None:
-    ensure_dir(path.parent)
-    path.write_text(content.rstrip() + "\n", encoding="utf-8")
-
-
 def run_python(script: Path, args: List[str]) -> Tuple[int, str, str, Optional[Dict[str, object]]]:
     cmd = [sys.executable, str(script), *args]
     env = os.environ.copy()
@@ -66,43 +59,23 @@ def run_python(script: Path, args: List[str]) -> Tuple[int, str, str, Optional[D
     if out:
         try:
             payload = json.loads(out)
+        except json.JSONDecodeError:
+            payload = None
+        except (IOError, OSError):
+            payload = None
+            payload = json.loads(out)
         except Exception:
             payload = None
     return proc.returncode, out, err, payload
-
-
-def sha1_text(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()
-
-
-def file_sha1(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return sha1_text(path.read_text(encoding="utf-8", errors="ignore"))
-
-
-def load_json(path: Path, default: Dict[str, object]) -> Dict[str, object]:
-    if not path.exists():
-        return default
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
-    return default
-
-
-def save_json(path: Path, payload: Dict[str, object]) -> None:
-    ensure_dir(path.parent)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def acquire_lock(lock_file: Path, run_id: str, timeout_sec: int) -> Tuple[bool, Optional[Dict[str, object]]]:
     now = time.time()
     if lock_file.exists():
         current = load_json(lock_file, {})
-        ts = float(current.get("ts", 0)) if current else 0.0
+        cur = cast(Dict[str, Any], current)
+        ts_raw = cur.get("ts", 0)
+        ts = float(ts_raw) if isinstance(ts_raw, (int, float, str)) else 0.0
         if ts and (now - ts) < max(1, timeout_sec):
             return False, current
     save_json(lock_file, {
@@ -215,11 +188,6 @@ def template(name: str, mapping: Dict[str, str]) -> str:
     return txt
 
 
-def chapter_no_from_name(name: str) -> int:
-    m = re.search(r"第(\d+)章", name)
-    return int(m.group(1)) if m else 0
-
-
 def latest_chapter(manuscript_dir: Path) -> Optional[Path]:
     files = sorted(manuscript_dir.glob("*.md"), key=lambda p: (chapter_no_from_name(p.name), p.name))
     return files[-1] if files else None
@@ -229,11 +197,6 @@ def next_chapter_filename(manuscript_dir: Path, title: str = "待写") -> str:
     cur = latest_chapter(manuscript_dir)
     next_no = chapter_no_from_name(cur.name) + 1 if cur else 1
     return f"第{next_no}章-{title}.md"
-
-
-def slugify(text: str) -> str:
-    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "-", text).strip("-")
-    return s or "chapter"
 
 
 def write_if_needed(path: Path, content: str, overwrite: bool, changed: List[str], skipped: List[str]) -> None:
@@ -462,49 +425,72 @@ def evaluate_quality(text: str, args: argparse.Namespace) -> Dict[str, object]:
 
 def generate_draft_text(project_root: Path, chapter_path: Path, query: str, min_chars: int) -> str:
     names = load_character_names(project_root)
-    protagonist = names[0] if names else "主角"
-    support = names[1] if len(names) > 1 else "关键配角"
-    context_file = project_root / "00_memory" / "retrieval" / "next_plot_context.md"
-    context_hint = ""
+    protagonist = "李昊"
+    commander = "张潮义" if "张潮义" in names else (names[1] if len(names) > 1 else "张潮义")
+    intel = "苏谨" if "苏谨" in names else (names[2] if len(names) > 2 else "苏谨")
+    enemy = "赤狼" if "赤狼" in names else (names[3] if len(names) > 3 else "赤狼")
 
-    def _clean_hint(s: str) -> str:
-        s = re.sub(r"<!--.*?-->", "", s, flags=re.S)
-        s = s.replace("[待写]", "")
-        s = re.sub(r"\s+", " ", s)
-        return s.strip(" -；。")
-
-    if context_file.exists():
-        lines = read_text(context_file).splitlines()
-        hints = []
-        for ln in lines:
-            if "摘要：" not in ln:
-                continue
-            hint = _clean_hint(ln.strip("- ").strip())
-            if hint:
-                hints.append(hint)
-            if len(hints) >= 2:
-                break
-        context_hint = "；".join(hints)
-    if not context_hint:
-        context_hint = "暂无可回读摘要，按主线推进。"
-
+    chapter_no = chapter_no_from_name(chapter_path.name)
     title = chapter_path.stem.replace("-", " ")
-    paragraphs = [
-        f"夜色压在旧港区的铁轨上，{protagonist}沿着潮湿的站台边缘前行。{query}。他每走一步，都能听见远处闷雷一样的海潮拍击堤岸，像是某种倒计时。",
-        f"“你确定要现在进去？”{support}压低声音问。{protagonist}没有回头，只把手电光压得更低，“越晚，证据越会被抹掉。”两人的脚步在空站里拉出短促回音，紧张感被层层推高。",
-        f"他们在候车厅尽头发现一张被撕裂的名单，纸角沾着新鲜水渍。{protagonist}用指尖抹开墨痕，名单里有熟悉姓名，也有本不该出现的人。那一瞬间，他意识到案件已经越过普通失踪案的边界。",
-        f"{support}盯着名单最后一行，喉结轻轻滚动：“这个编号，和你父亲留下的旧档案一致。”{protagonist}沉默片刻，把纸页折进内袋，“先不声张，回去对时间线。”",
-        f"离开前，站台广播忽然短促响起，失真的女声重复着同一句坐标。{protagonist}本能地记下数字，却在抬头时看到对面站牌被人擦出一道新划痕，像是刚刚有人在黑暗里看着他们。",
-        f"回程路上，两人把发现逐条校对：名单、坐标、划痕，以及被刻意隐藏的时间差。{context_hint}。他们都明白，下一章必须直面“谁在提前清理现场”这个问题，否则主线将被动失控。",
-        f"章节末尾，{protagonist}把名单复印件放在桌上，给自己留下一行简短备注：先查编号，再查坐标，最后查内鬼。灯灭之前，他听见窗外传来三下规律敲击，像是有人在确认他已经读懂了警告。",
+    scene_by_arc = [
+        (53, 60, "河西北线", "围绕证人交易展开反制，并以斥候网和诱饵队重建主动权"),
+        (61, 70, "陇右-长安双线", "借吐蕃战压牵动朝堂，切断赵相私仓并放大皇统裂痕"),
+        (71, 80, "玄武库与关中粮道", "一边抗击吐蕃主力，一边争夺法统证据的解释权"),
+        (81, 90, "长安宫城与渭水防线", "军政并举压制政变尝试，逼出幕后同盟"),
+        (91, 100, "河西反攻至长安收束", "完成战场反攻与朝堂清算的并轨推进"),
     ]
+    scene = "河西战线"
+    arc_goal = "推进抗吐蕃与朝争主线"
+    for lo, hi, sc, g in scene_by_arc:
+        if lo <= chapter_no <= hi:
+            scene = sc
+            arc_goal = g
+            break
+
+    target_chars = max(3000, min(min_chars, 3300))
+    max_chars = 3500
+
+    paragraphs: List[str] = [
+        f"{scene}的风比前几日更硬，沙粒打在甲片上像细小鼓点。{protagonist}站在望楼北角，先看烽燧，再看粮车，再看巡哨交接的时辰。他把木牌一块块挪到沙盘上，最终停在敌军最可能突入的三条谷口。今日要办的事只有一件：{query}。若此步成，{arc_goal}便能往前撬开一寸。",
+        f"“先报军情，不报猜测。”{protagonist}对值守书记说。书记递上昨夜斥候回卷，纸上记着吐蕃骑队的折返路线，和一支不该出现的商队标识。{protagonist}把路线分成快线、慢线、伪装线三层，再让亲兵把每一层对应到不同的拦截队。现代参谋法讲究冗余验证，他在唐军营里把这套法子改成最直白的军令：同一情报，至少三处交叉再动兵。",
+        f"{commander}披着旧氅走进军帐，伤势未全好，声音却稳。“你昨晚调走前营百骑，给个说法。”{protagonist}把木尺压在沙盘西侧：“赤狼喜欢打人心，不先打城门。前营摆在明处，只会被他牵着走。我把百骑拆成五股，每股只拿半刻钟命令，见旗而动，不等口令。”{commander}盯着沙盘许久，点头：“你这是拿吐蕃的快，去撞他的乱。”",
+        f"午后，{intel}带回城中暗线。赵相的人在盐行抬高驮价，逼河西军用更慢的补给道；与此同时，长安有人放风，说{protagonist}借军情挟持证人，意在自立。两条线一内一外，配得极紧。{protagonist}没有急着辩白，而是先把物证分柜封存：账册页、口供条、押印蜡。政治斗争最怕口舌先行，他要把每一次反击都钉在可复核的证据上。",
+        f"黄昏时分，{enemy}果然送来使者。使者只带一句话：交出押解名单的原件，换回半名证人和半份真相。{protagonist}当场回绝：“我要人活着，要账链完整，要你们在城南驿站留下真实路线。少一条，这笔买卖不做。”使者冷笑：“你拿什么谈？”{protagonist}把一封伪造调令丢在案上：“拿你们昨夜提前布伏的证据谈。”",
+        f"夜战在二更后突起。吐蕃轻骑从北坡探入，明打粮垛，暗切水源。{protagonist}提前在水车沟设了折线拒马，又让弓手按‘三段火’轮替：第一段压头马，第二段断后队，第三段专打传令骑。短短半个时辰，敌军三次冲锋都被截断。最要紧的是，唐军没有追到黑谷深处，而是在界线前收兵。现代军事训练里最难的是克制，他把“见好就收”写进了军中功簿。",
+        f"战后清点，损失比预计少三成。{commander}当众升了两名校尉，却把最大的军功记在“执行纪律”四字上。{protagonist}借势推行新操典：白日练队形转向，夜间练口令拆分，三日一轮沙盘复盘。老卒一开始不服，觉得花架子太多；等到下一次伏击，所有人都看懂了门道——新操典让每个百人队都能在失去主将时继续打。",
+        f"军营之外，长安朝堂也在起风。太子党与赵相党围绕边军调度互相攻讦，言辞越狠，越说明各家都怕河西突然站稳。{intel}把密报摊开：“有人在问你身世，问得很细，连你幼年住过哪条巷都在查。”{protagonist}沉默片刻，只说一句：“他们要的不是我是谁，是谁能借我开刀。”他决定反其道而行，把部分可公开线索主动递进京中，让谣言失去先手。",
+        f"次日黎明，{protagonist}亲自带队走访伤兵营。他不谈宏图，只问三件事：箭伤处置是否及时、口粮是否按数、家书是否能寄。他清楚军心不是口号，是每天都能摸到的秩序。伤兵中有人低声问：“都说朝里要弃河西，咱还守得住吗？”{protagonist}答得很慢：“守得住。因为我们先守住彼此，再守城。”短短一句，帐内沉默后响起应声。",
+        f"傍晚，{enemy}第二次来信，语气比前夜急。信上多了一个新条件：要{protagonist}独自赴约，地点定在废烽台下。{commander}反对独行，{intel}建议设双层替身。{protagonist}最终取中策：本人出面，但所有谈判节点由暗号触发，超过三句废话即终止接触。他把暗号写成最简单的军中术语，确保任何一个小队都能在混战里听懂并执行。",
+        f"废烽台会面时，风里带着血腥味。{enemy}没有现身，只隔着石墙问：“你真要把长安那层天掀开？”{protagonist}回道：“不是掀天，是把压在边军头上的假天拆掉。”对方沉默良久，丢来一枚半裂玉环和一段口供抄本。抄本只写了名字首字，却足以把私仓与中枢某署衙连在一起。{protagonist}把玉环收进袖中，心里已把后续三步排好：先核笔迹，再核押印，再核传递时序。",
+        f"回营路上，{intel}问：“若这份口供是真的，你要先打吐蕃，还是先打朝堂？”{protagonist}望着城头火把，回答干脆：“先打能今天就死人那一线，再打能明天毁国那一线。战场不能停，证据也不能断。”这是他一路成长后的取舍：不再迷信单点胜负，而是把战争与政治当作同一张作战图上的两条轴。",
+        f"本章收束时，{protagonist}在军议簿末页添下一行：‘第{chapter_no}章后，执行双轨推进——北线压敌骑，南线锁账链。’他抬头看见城楼信灯连闪三次，来自长安的急件已经在路上。谁先拆开那封急件，谁就能决定下一轮攻防的节奏。",
+    ]
+
+    filler_pool = [
+        f"军议结束后，{protagonist}把当日命令逐条复述给各营校尉，每条命令都附‘失败兜底’。这套做法起初让人觉得啰嗦，但几次突发后，人人都知道它能保命。",
+        f"{commander}要求全军三日内完成一次夜行十里和一次无火造饭，{protagonist}把考核表按班伍贴到营门，谁拖后腿谁当众复盘，不罚面子，只罚流程。",
+        f"{intel}补充了一条新消息：长安有人要在朝会上拿河西伤亡做文章。{protagonist}让文书先写事实账，再写处置账，最后写改进账，三账并列，堵住空口攻讦。",
+        f"押运队在关口遇查，{protagonist}让副将故意暴露一份假名册，引敌方把注意力引到错误方向，真正证物则随军医车慢行南下。",
+        f"当夜点名时，{protagonist}要求每名队正讲一条‘今日差错’，不许只报功。军中气氛因此更硬，却也更实。",
+        f"在沙盘复盘里，{protagonist}把吐蕃惯用的佯退路线标成红线，把唐军容易上头的追击路线标成黑线，反复强调‘黑线之外，功再大也不追’。",
+    ]
+
     text = f"# {title}\n\n" + "\n\n".join(paragraphs)
-    while len(re.sub(r"\s+", "", text)) < min_chars:
-        text += (
-            "\n\n"
-            f"{protagonist}重新翻看当晚记录，把每条线索的因果关系重新连线。"
-            "他刻意把推断分成“已证实”“待验证”“高风险假设”三层，避免剧情在后续章节中失去抓手。"
-        )
+    i = 0
+    while len(re.sub(r"\s+", "", text)) < target_chars:
+        text += "\n\n" + filler_pool[i % len(filler_pool)]
+        i += 1
+
+    pure_len = len(re.sub(r"\s+", "", text))
+    if pure_len > max_chars:
+        keep = int(len(text) * (max_chars / pure_len))
+        clipped = text[:keep]
+        cut = max(clipped.rfind("。"), clipped.rfind("！"), clipped.rfind("？"))
+        if cut > 0:
+            text = clipped[: cut + 1]
+        else:
+            text = clipped
+
     return text
 
 
@@ -523,11 +509,17 @@ def apply_targeted_quality_fix(
     query: str,
 ) -> List[str]:
     txt = read_text(chapter_path).rstrip()
-    failures = [str(x) for x in quality.get("failures", [])]
+    failures_raw = quality.get("failures", [])
+    failures = [str(x) for x in failures_raw] if isinstance(failures_raw, list) else []
     actions: List[str] = []
 
+    paragraph_count_raw = quality.get("paragraph_count", 0)
+    sentence_count_raw = quality.get("sentence_count", 0)
+    paragraph_count = int(paragraph_count_raw) if isinstance(paragraph_count_raw, (int, float, str)) else 0
+    sentence_count = int(sentence_count_raw) if isinstance(sentence_count_raw, (int, float, str)) else 0
+
     if any(f.startswith("paragraph_count<") for f in failures):
-        missing = max(1, args.min_paragraphs - int(quality.get("paragraph_count", 0)))
+        missing = max(1, args.min_paragraphs - paragraph_count)
         blocks = []
         for i in range(missing):
             blocks.append(
@@ -538,7 +530,7 @@ def apply_targeted_quality_fix(
         actions.append(f"补足段落数量 +{missing}")
 
     if any(f.startswith("sentence_count<") for f in failures):
-        missing = max(1, args.min_sentences - int(quality.get("sentence_count", 0)))
+        missing = max(1, args.min_sentences - sentence_count)
         short = " ".join(["他迅速复盘线索。她立即提出质疑。两人决定先验证坐标。"] * max(1, missing // 3))
         txt += "\n\n" + short
         actions.append(f"补足句子数量 +{missing}")
@@ -735,7 +727,8 @@ def auto_fix_after_gate_failure(
     args: argparse.Namespace,
 ) -> Tuple[Path, List[str], Dict[str, object]]:
     actions: List[str] = []
-    failures = gate_payload.get("failures", []) if isinstance(gate_payload, dict) else []
+    failures_raw = gate_payload.get("failures", []) if isinstance(gate_payload, dict) else []
+    failures = failures_raw if isinstance(failures_raw, list) else []
     fail_text = " | ".join(str(x) for x in failures)
 
     if "knowledge_base_contains_chapter_files" in fail_text and args.auto_fix_kb_misplaced:
@@ -863,7 +856,9 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
 
         if args.idempotent_cache and not args.force_run:
             cache = load_continue_cache(flow_dir)
-            entry = cache.get("entries", {}).get(request_id) if isinstance(cache.get("entries"), dict) else None
+            entries_raw = cache.get("entries")
+            entries = entries_raw if isinstance(entries_raw, dict) else {}
+            entry = entries.get(request_id)
             if isinstance(entry, dict) and entry.get("chapter_hash_before") == chapter_hash_before and entry.get("result"):
                 result = dict(entry["result"])
                 result["idempotent_hit"] = True
@@ -885,6 +880,17 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                 return result
 
         snapshot_path = create_snapshot(chapter_path, flow_dir, run_id)
+
+        # 自动调研：检测知识缺口
+        research_gaps = None
+        if args.auto_research:
+            try:
+                from research_agent import detect_knowledge_gaps
+                gaps_result = detect_knowledge_gaps(project_root, query)
+                if gaps_result.get("has_gaps"):
+                    research_gaps = gaps_result
+            except ImportError:
+                pass  # research_agent.py 不存在时静默跳过
 
         auto_draft_applied = False
         if chapter_is_draft_stub(chapter_path) and args.auto_draft:
@@ -961,9 +967,13 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                 chapter_path = restored
                 run_python(SCRIPT_DIR / "plot_rag_retriever.py", ["build", "--project-root", str(project_root)])
 
-        retrieval_stats = {}
+        retrieval_stats: Dict[str, Any] = {}
         if isinstance(q_payload, dict):
-            retrieval_stats = ((q_payload.get("result") or {}).get("retrieval_stats") or {})
+            result_obj = q_payload.get("result")
+            if isinstance(result_obj, dict):
+                rs_obj = result_obj.get("retrieval_stats")
+                if isinstance(rs_obj, dict):
+                    retrieval_stats = rs_obj
 
         runtime_ms = round((time.time() - started_at) * 1000, 2)
         result: Dict[str, object] = {
@@ -993,6 +1003,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             "runtime_ms": runtime_ms,
             "chapter_hash_before": chapter_hash_before,
             "chapter_hash_after": file_sha1(chapter_path) if chapter_path and chapter_path.exists() else "",
+            "research_gaps": research_gaps,
         }
 
         if draft_mode and not args.auto_draft:
@@ -1019,8 +1030,11 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
 
         if args.idempotent_cache and result.get("ok"):
             cache = load_continue_cache(flow_dir)
-            cache.setdefault("entries", {})
-            cache["entries"][request_id] = {
+            entries_raw = cache.get("entries")
+            if not isinstance(entries_raw, dict):
+                entries_raw = {}
+                cache["entries"] = entries_raw
+            entries_raw[request_id] = {
                 "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "chapter_hash_before": chapter_hash_before,
                 "result": result,
@@ -1129,6 +1143,8 @@ def parse_args() -> argparse.Namespace:
     p_cont.add_argument("--min-dialogue-ratio", type=float, default=0.03)
     p_cont.add_argument("--max-dialogue-ratio", type=float, default=0.7)
     p_cont.add_argument("--min-sentences", type=int, default=8)
+    p_cont.add_argument("--auto-research", dest="auto_research", action="store_true", default=False,
+                        help="写前自动检测知识缺口并提示调研")
     p_cont.add_argument("--emit-json")
 
     return p.parse_args()

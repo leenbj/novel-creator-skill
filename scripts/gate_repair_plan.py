@@ -7,14 +7,10 @@
 import argparse
 import datetime as dt
 import json
-import re
 from pathlib import Path
 from typing import Dict, List
 
-
-def slugify(text: str) -> str:
-    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "-", text).strip("-")
-    return s or "chapter"
+from common import slugify
 
 
 def resolve_chapter(project_root: Path, chapter_file: str) -> Path:

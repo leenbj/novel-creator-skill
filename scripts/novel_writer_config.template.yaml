@@ -1,0 +1,61 @@
+# Novel Chapter Writer 配置模板
+# 复制此文件为 .novel_writer_config.yaml 放在你的小说项目根目录
+
+# ==================== AI提供商设置 ====================
+
+# 选择AI提供商: openai, anthropic, local, kimi, glm, minimax
+ai_provider: openai
+
+# 模型名称
+# OpenAI: gpt-4, gpt-4-turbo, gpt-3.5-turbo
+# Anthropic: claude-3-opus-20240229, claude-3-sonnet-20240229, claude-3-haiku-20240307
+# Kimi (Moonshot): moonshot-v1-auto, moonshot-v1-8k, moonshot-v1-32k, moonshot-v1-128k
+# GLM (智谱): glm-4-plus, glm-4, glm-4-flash
+# MiniMax: MiniMax-Text-01
+# Local: 取决于你的本地模型名称
+model: gpt-4
+
+# API密钥（也可以通过环境变量设置）
+# OpenAI: OPENAI_API_KEY 环境变量或在此设置
+# Anthropic: ANTHROPIC_API_KEY 环境变量或在此设置
+# Kimi: MOONSHOT_API_KEY 环境变量或在此设置
+# GLM: GLM_API_KEY 环境变量或在此设置
+# MiniMax: MINIMAX_API_KEY 环境变量或在此设置
+openai_api_key: ""
+anthropic_api_key: ""
+
+# 本地模型API地址（仅用于local provider）
+local_api_url: "http://localhost:11434/api/generate"
+
+# 自定义 OpenAI 兼容 API（可选，填写后 ai_provider 设为对应名称即可）
+# base_url: "https://api.moonshot.cn/v1"
+
+# ==================== 生成参数设置 ====================
+
+# 温度 (0.0 - 2.0)，越高越创造性，越低越保守
+temperature: 0.8
+
+# 最大token数
+max_tokens: 4000
+
+# ==================== 章节生成设置 ====================
+
+# 章节最小字数（中文字符）
+min_chapter_chars: 3000
+
+# 章节目标字数
+target_chapter_chars: 3500
+
+# 加载前几章作为上下文
+context_window: 5
+
+# 是否保持风格一致性
+style_consistency: true
+
+# ==================== 自动化设置 ====================
+
+# 自动生成后是否更新记忆文件
+auto_update_memory: true
+
+# 生成后是否自动运行门禁检查
+run_gate_check: false

@@ -34,7 +34,7 @@ STOP_PHRASES = {
 }
 
 
-def slugify(value: str) -> str:
+def _slugify_style(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-").lower()
     if slug:
         return slug
@@ -352,7 +352,7 @@ def main() -> int:
 
     metrics = collect_metrics(text, args.top_n)
     profile_name = args.profile_name.strip()
-    slug = slugify(profile_name)
+    slug = _slugify_style(profile_name)
 
     global_dir = Path(args.global_library).expanduser().resolve()
     global_dir.mkdir(parents=True, exist_ok=True)

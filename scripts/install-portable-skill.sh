@@ -85,13 +85,12 @@ mkdir -p "$DEST"
 copy_core() {
   cp "$SRC_DIR/novel-creator.md" "$DEST/"
   cp "$SRC_DIR/novel-creator.json" "$DEST/"
-  cp "$SRC_DIR/novel-analyzer.md" "$DEST/"
-  cp "$SRC_DIR/novel-analyzer.json" "$DEST/"
   cp "$SRC_DIR/SKILL.md" "$DEST/"
   cp -R "$SRC_DIR/templates" "$DEST/"
   cp -R "$SRC_DIR/references" "$DEST/"
   cp -R "$SRC_DIR/scripts" "$DEST/"
-  cp -R "$SRC_DIR/assets" "$DEST/"
+  # 可选目录，存在时才复制
+  [[ -d "$SRC_DIR/assets" ]] && cp -R "$SRC_DIR/assets" "$DEST/" || true
 }
 
 write_entry() {

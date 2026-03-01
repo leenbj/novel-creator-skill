@@ -14,59 +14,27 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-STOPWORDS = {
-    "我们", "你们", "他们", "她们", "它们", "这个", "那个", "一种", "已经", "因为", "所以", "如果",
-    "但是", "然后", "自己", "不是", "不会", "就是", "还是", "一个", "一些", "可以", "时候", "什么",
-    "怎么", "这样", "那样", "起来", "进去", "出来", "一下", "一样", "以及", "并且", "或者", "然后",
-}
+from common import ensure_dir, read_text, slugify, chapter_no_from_name, normalize_text
+from config import get_retrieval_config
+from performance import Tokenizer
 
-TRIGGER_KEYWORDS = {
-    "冲突", "反转", "伏笔", "回收", "真相", "背叛", "联盟", "新角色", "时间线", "回忆",
-    "穿越", "死亡", "复活", "势力", "升级", "突破", "决战", "危机", "转折", "悬念",
-}
+# 从集中配置加载检索相关常量
+_retrieval_config = get_retrieval_config()
+STOPWORDS = _retrieval_config.stopwords
+TRIGGER_KEYWORDS = _retrieval_config.trigger_keywords
+LIGHT_SCENE_KEYWORDS = _retrieval_config.light_scene_keywords
 
-LIGHT_SCENE_KEYWORDS = {
-    "日常", "过渡", "环境描写", "吃饭", "赶路", "休整", "闲聊", "铺垫",
-}
-
-
-def slugify(text: str) -> str:
-    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "-", text).strip("-")
-    return s or "chapter"
-
-
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-
-
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="ignore")
-
-
-def normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+# 全局分词器实例（带缓存，性能优于手写版本）
+_tokenizer = Tokenizer(stopwords=STOPWORDS)
 
 
 def tokenize(text: str) -> List[str]:
-    # 中文采用 2~4 字片段，英文按词；保持轻量可解释。
-    tokens: List[str] = []
-    for seq in re.findall(r"[\u4e00-\u9fff]{2,}", text):
-        n = len(seq)
-        for k in (2, 3, 4):
-            if n < k:
-                continue
-            for i in range(n - k + 1):
-                t = seq[i : i + k]
-                if t in STOPWORDS:
-                    continue
-                tokens.append(t)
-    tokens += [w.lower() for w in re.findall(r"[A-Za-z]{3,}", text)]
-    return tokens
+    """中文 2~4 字 n-gram + 英文词分词，委托给优化的 Tokenizer 实现。"""
+    return _tokenizer.tokenize(text)
 
 
 def parse_chapter_no(filename: str) -> int:
-    m = re.search(r"第(\d+)章", filename)
-    return int(m.group(1)) if m else 0
+    return chapter_no_from_name(filename)
 
 
 def normalize_query(query: str) -> str:
@@ -327,7 +295,10 @@ def load_cache(path: Path) -> Dict[str, object]:
             return {"entries": {}}
         obj.setdefault("entries", {})
         return obj
-    except Exception:
+    except json.JSONDecodeError:
+        return {"entries": {}}
+    except (IOError, OSError):
+        return {"entries": {}}
         return {"entries": {}}
 
 
