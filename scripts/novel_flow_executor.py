@@ -52,7 +52,10 @@ def run_python(script: Path, args: List[str]) -> Tuple[int, str, str, Optional[D
     cmd = [sys.executable, str(script), *args]
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+    except subprocess.TimeoutExpired:
+        return -1, "", "子进程超时 (300s)", None
     out = proc.stdout.strip()
     err = proc.stderr.strip()
     payload = None
@@ -60,11 +63,6 @@ def run_python(script: Path, args: List[str]) -> Tuple[int, str, str, Optional[D
         try:
             payload = json.loads(out)
         except json.JSONDecodeError:
-            payload = None
-        except (IOError, OSError):
-            payload = None
-            payload = json.loads(out)
-        except Exception:
             payload = None
     return proc.returncode, out, err, payload
 
@@ -114,9 +112,18 @@ def restore_snapshot(snapshot_path: Path, original_path: Path, current_path: Pat
     return original_path
 
 
-def make_request_id(args: argparse.Namespace, chapter_path: Path, query: str, chapter_hash_before: str) -> str:
+def make_request_id(args: argparse.Namespace, chapter_path: Path, query: str, chapter_hash_before: str, project_root: Path = None) -> str:
+    # 使用相对路径避免符号链接解析导致缓存键不一致
+    try:
+        if project_root and chapter_path.is_relative_to(project_root):
+            path_key = str(chapter_path.relative_to(project_root))
+        else:
+            path_key = chapter_path.name
+    except (ValueError, TypeError):
+        path_key = chapter_path.name
+
     raw = "|".join([
-        str(chapter_path.resolve()),
+        path_key,
         query.strip(),
         str(args.top_k),
         str(args.min_chars),
@@ -384,39 +391,106 @@ def clean_for_stats(text: str) -> str:
 
 
 def evaluate_quality(text: str, args: argparse.Namespace) -> Dict[str, object]:
+    """增强版质量评估 - 添加内容密度、AI词密度、段落多样性检查"""
+    import statistics
+
     body = clean_for_stats(text)
     pure = re.sub(r"\s+", "", body)
     char_count = len(pure)
+    
+    # 计算正文密度（排除标记、注释等）
+    content_density = len(pure) / len(body) if body else 0
+    
+    # 检查AI高频词密度
+    ai_phrase_count = sum(body.count(w) for w in AI_PHRASE_BLACKLIST)
+    ai_density = ai_phrase_count / char_count if char_count else 0
+    
+    # 段落多样性检查
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+    para_lengths = [len(p) for p in paragraphs]
+    para_variance = statistics.variance(para_lengths) if len(para_lengths) > 1 else 0
     paragraph_count = len(paragraphs)
-    dialogue_chars = sum(len(m.group(1)) for m in re.finditer(r"[“\"]([^”\"]+)[”\"]", body))
-    dialogue_ratio = (dialogue_chars / char_count) if char_count else 0.0
-    sentence_count = len(re.findall(r"[。！？!?]", body))
 
+    # 段落重复度检查（P0-01 新增）
+    # 使用标准化段落文本进行重复检测
+    normalized_paragraphs = [re.sub(r'\s+', ' ', p).strip() for p in paragraphs]
+    para_counter: Dict[str, int] = {}
+    for p in normalized_paragraphs:
+        para_counter[p] = para_counter.get(p, 0) + 1
+
+    unique_paragraph_count = len(para_counter)
+    paragraph_unique_ratio = unique_paragraph_count / paragraph_count if paragraph_count > 0 else 1.0
+    max_duplicate_paragraph_repeat = max(para_counter.values()) if para_counter else 1
+    
+    # 对话占比：同时识别中文引号和英文引号
+    dialogue_chars = sum(len(m.group(1)) for m in re.finditer(r"[“\"]([^”\"]*)[”\"]", body))
+    dialogue_ratio = (dialogue_chars / char_count) if char_count else 0.0
+    
+    # 句子数
+    sentence_count = len(re.findall(r"[。！？!?]", body))
+    
+    # AI词命中详情
     ai_phrase_hits = []
     for w in AI_PHRASE_BLACKLIST:
         c = body.count(w)
         if c > 0:
             ai_phrase_hits.append({"phrase": w, "count": c})
-
+    
+    # 失败检查 - 增强版
     failures: List[str] = []
     if char_count < args.min_chars:
-        failures.append(f"char_count<{args.min_chars}")
+        failures.append(f"char_count<{args.min_chars} (current: {char_count})")
     if paragraph_count < args.min_paragraphs:
         failures.append(f"paragraph_count<{args.min_paragraphs}")
+    
+    # 新增检查项
+    min_density = getattr(args, 'min_content_density', 0.7)
+    if content_density < min_density:
+        failures.append(f"content_density<{min_density:.2f} (current: {content_density:.2f})")
+    
+    max_ai_density = getattr(args, 'max_ai_phrase_density', 0.05)
+    if ai_density > max_ai_density:
+        failures.append(f"ai_phrase_density_too_high ({ai_density:.2%}, max: {max_ai_density:.2%})")
+    
+    max_variance = getattr(args, 'max_paragraph_variance', 10000)
+    if para_variance > max_variance:
+        failures.append(f"paragraph_variance_too_high ({para_variance:.0f}, max: {max_variance})")
+    
+    # 原有检查项
     if dialogue_ratio < args.min_dialogue_ratio:
-        failures.append(f"dialogue_ratio<{args.min_dialogue_ratio}")
+        failures.append(f"dialogue_ratio_too_low ({dialogue_ratio:.2%})")
     if dialogue_ratio > args.max_dialogue_ratio:
-        failures.append(f"dialogue_ratio>{args.max_dialogue_ratio}")
+        failures.append(f"dialogue_ratio_too_high ({dialogue_ratio:.2%})")
     if sentence_count < args.min_sentences:
-        failures.append(f"sentence_count<{args.min_sentences}")
+        failures.append(f"sentence_count_too_low ({sentence_count})")
+
+    # 段落重复度失败检查（P0-01 新增）
+    min_unique_ratio = getattr(args, 'min_paragraph_unique_ratio', 0.85)
+    max_dup_repeat = getattr(args, 'max_duplicate_paragraph_repeat', 2)
+
+    if paragraph_unique_ratio < min_unique_ratio:
+        failures.append(
+            f"paragraph_unique_ratio<{min_unique_ratio:.2f} (current: {paragraph_unique_ratio:.2%}, "
+            f"unique={unique_paragraph_count}/{paragraph_count})"
+        )
+
+    if max_duplicate_paragraph_repeat > max_dup_repeat:
+        failures.append(
+            f"max_duplicate_paragraph_repeat>{max_dup_repeat} (current: {max_duplicate_paragraph_repeat})"
+        )
 
     return {
         "char_count": char_count,
         "paragraph_count": paragraph_count,
+        "sentence_count": sentence_count,
         "dialogue_chars": dialogue_chars,
         "dialogue_ratio": round(dialogue_ratio, 4),
-        "sentence_count": sentence_count,
+        "content_density": round(content_density, 4),
+        "ai_density": round(ai_density, 4),
+        "paragraph_variance": round(para_variance, 2),
+        "paragraph_unique_ratio": round(paragraph_unique_ratio, 4),
+        "max_duplicate_paragraph_repeat": max_duplicate_paragraph_repeat,
+        "unique_paragraph_count": unique_paragraph_count,
         "ai_phrase_hits": ai_phrase_hits,
         "passed": len(failures) == 0,
         "failures": failures,
@@ -425,10 +499,11 @@ def evaluate_quality(text: str, args: argparse.Namespace) -> Dict[str, object]:
 
 def generate_draft_text(project_root: Path, chapter_path: Path, query: str, min_chars: int) -> str:
     names = load_character_names(project_root)
-    protagonist = "李昊"
-    commander = "张潮义" if "张潮义" in names else (names[1] if len(names) > 1 else "张潮义")
-    intel = "苏谨" if "苏谨" in names else (names[2] if len(names) > 2 else "苏谨")
-    enemy = "赤狼" if "赤狼" in names else (names[3] if len(names) > 3 else "赤狼")
+    # 从角色列表获取主角名，避免硬编码
+    protagonist = names[0] if names else "主角"
+    commander = "张潮义" if "张潮义" in names else (names[1] if len(names) > 1 else "指挥官")
+    intel = "苏谨" if "苏谨" in names else (names[2] if len(names) > 2 else "情报员")
+    enemy = "赤狼" if "赤狼" in names else (names[3] if len(names) > 3 else "敌人")
 
     chapter_no = chapter_no_from_name(chapter_path.name)
     title = chapter_path.stem.replace("-", " ")
@@ -529,13 +604,13 @@ def apply_targeted_quality_fix(
         txt += "\n\n" + "\n\n".join(blocks)
         actions.append(f"补足段落数量 +{missing}")
 
-    if any(f.startswith("sentence_count<") for f in failures):
+    if any(f.startswith("sentence_count<") or f.startswith("sentence_count_too_low") for f in failures):
         missing = max(1, args.min_sentences - sentence_count)
         short = " ".join(["他迅速复盘线索。她立即提出质疑。两人决定先验证坐标。"] * max(1, missing // 3))
         txt += "\n\n" + short
         actions.append(f"补足句子数量 +{missing}")
 
-    if any(f.startswith("dialogue_ratio<") for f in failures):
+    if any(f.startswith("dialogue_ratio<") or f.startswith("dialogue_ratio_too_low") for f in failures):
         txt += (
             "\n\n"
             f"“先别下结论，”同伴压低声音，“{query}这条线还缺最后一块证据。”"
@@ -543,7 +618,7 @@ def apply_targeted_quality_fix(
         )
         actions.append("补足对话占比")
 
-    if any(f.startswith("dialogue_ratio>") for f in failures):
+    if any(f.startswith("dialogue_ratio>") or f.startswith("dialogue_ratio_too_high") for f in failures):
         txt += (
             "\n\n"
             "叙述补偿：两人将对话结论写入行动清单，逐项标记风险等级与验证顺序，"
@@ -572,24 +647,33 @@ def apply_targeted_quality_fix(
 
 def write_quality_report(gate_dir: Path, quality_before: Dict[str, object], quality_after: Dict[str, object]) -> Path:
     p = gate_dir / "quality_report.md"
+
+    # 辅助函数：安全获取字典值
+    def safe_get(d: Dict[str, object], key: str, default: Any = None) -> Any:
+        return d.get(key, default) if isinstance(d, dict) else default
+
     lines = [
         "# 章节质量检查",
         "",
         "## 修复前",
-        f"- 字符数：{quality_before['char_count']}",
-        f"- 段落数：{quality_before['paragraph_count']}",
-        f"- 对话占比：{quality_before['dialogue_ratio']}",
-        f"- 句子数：{quality_before['sentence_count']}",
-        f"- 失败项：{quality_before['failures']}",
+        f"- 字符数：{safe_get(quality_before, 'char_count', 'N/A')}",
+        f"- 段落数：{safe_get(quality_before, 'paragraph_count', 'N/A')}",
+        f"- 对话占比：{safe_get(quality_before, 'dialogue_ratio', 'N/A')}",
+        f"- 句子数：{safe_get(quality_before, 'sentence_count', 'N/A')}",
+        f"- 段落唯一比例：{safe_get(quality_before, 'paragraph_unique_ratio', 'N/A')}",
+        f"- 最大重复段落次数：{safe_get(quality_before, 'max_duplicate_paragraph_repeat', 'N/A')}",
+        f"- 失败项：{safe_get(quality_before, 'failures', [])}",
         "",
         "## 修复后",
-        f"- 字符数：{quality_after['char_count']}",
-        f"- 段落数：{quality_after['paragraph_count']}",
-        f"- 对话占比：{quality_after['dialogue_ratio']}",
-        f"- 句子数：{quality_after['sentence_count']}",
-        f"- 失败项：{quality_after['failures']}",
+        f"- 字符数：{safe_get(quality_after, 'char_count', 'N/A')}",
+        f"- 段落数：{safe_get(quality_after, 'paragraph_count', 'N/A')}",
+        f"- 对话占比：{safe_get(quality_after, 'dialogue_ratio', 'N/A')}",
+        f"- 句子数：{safe_get(quality_after, 'sentence_count', 'N/A')}",
+        f"- 段落唯一比例：{safe_get(quality_after, 'paragraph_unique_ratio', 'N/A')}",
+        f"- 最大重复段落次数：{safe_get(quality_after, 'max_duplicate_paragraph_repeat', 'N/A')}",
+        f"- 失败项：{safe_get(quality_after, 'failures', [])}",
         "",
-        f"- 通过：{quality_after['passed']}",
+        f"- 通过：{safe_get(quality_after, 'passed', False)}",
     ]
     write_text(p, "\n".join(lines))
     return p
@@ -839,6 +923,22 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             if not chapter_path.is_absolute():
                 chapter_path = project_root / chapter_path
             chapter_path = chapter_path.resolve()
+            # 安全检查：确保路径在项目目录内，防止路径遍历攻击
+            try:
+                chapter_path.relative_to(project_root.resolve())
+            except ValueError:
+                return {
+                    "ok": False,
+                    "error": f"安全错误：章节文件必须在项目目录内: {args.chapter_file}",
+                }
+            # 安全检查：确保路径在项目目录内，防止路径遍历攻击
+            try:
+                chapter_path.relative_to(project_root.resolve())
+            except ValueError:
+                return {
+                    "ok": False,
+                    "error": f"安全错误：章节文件必须在项目目录内: {args.chapter_file}",
+                }
         else:
             chapter_path = (manuscript_dir / next_chapter_filename(manuscript_dir, title=args.chapter_title)).resolve()
         original_chapter_path = chapter_path
@@ -852,7 +952,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             )
 
         chapter_hash_before = file_sha1(chapter_path)
-        request_id = make_request_id(args, chapter_path, query, chapter_hash_before)
+        request_id = make_request_id(args, chapter_path, query, chapter_hash_before, project_root)
 
         if args.idempotent_cache and not args.force_run:
             cache = load_continue_cache(flow_dir)
@@ -893,10 +993,62 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                 pass  # research_agent.py 不存在时静默跳过
 
         auto_draft_applied = False
+        draft_provider_used = getattr(args, 'draft_provider', 'template')
+        fallback_applied = False
+        llm_error_msg = None
+
         if chapter_is_draft_stub(chapter_path) and args.auto_draft:
-            draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
-            write_text(chapter_path, draft)
-            auto_draft_applied = True
+            if draft_provider_used == "llm":
+                # 尝试使用 LLM 写作
+                try:
+                    from novel_chapter_writer import write_chapter
+                    config_overrides = {}
+                    if args.llm_provider:
+                        config_overrides['ai_provider'] = args.llm_provider
+                    if args.llm_model:
+                        config_overrides['model'] = args.llm_model
+                    if args.llm_api_key:
+                        provider = args.llm_provider or 'openai'
+                        if provider == 'openai':
+                            config_overrides['openai_api_key'] = args.llm_api_key
+                        elif provider == 'anthropic':
+                            config_overrides['anthropic_api_key'] = args.llm_api_key
+                        else:
+                            config_overrides['api_key'] = args.llm_api_key
+
+                    llm_result = write_chapter(
+                        project_root,
+                        chapter_file=chapter_path,
+                        config_overrides=config_overrides,
+                        dry_run=False,
+                        context_window=5,
+                    )
+
+                    if llm_result.get("ok"):
+                        draft_provider_used = "llm"
+                        auto_draft_applied = True
+                    else:
+                        # LLM 调用失败，回退到模板
+                        llm_error_msg = llm_result.get("error", "unknown error")
+                        draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
+                        write_text(chapter_path, draft)
+                        draft_provider_used = "template"
+                        fallback_applied = True
+                        auto_draft_applied = True
+
+                except Exception as e:
+                    # 导入或调用异常，回退到模板
+                    llm_error_msg = str(e)
+                    draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
+                    write_text(chapter_path, draft)
+                    draft_provider_used = "template"
+                    fallback_applied = True
+                    auto_draft_applied = True
+            else:
+                # template 模式
+                draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
+                write_text(chapter_path, draft)
+                auto_draft_applied = True
 
         draft_mode = chapter_is_draft_stub(chapter_path)
 
@@ -983,6 +1135,9 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             "chapter_file": str(chapter_path) if chapter_path else "",
             "created_chapter_stub": created_chapter_stub,
             "auto_draft_applied": auto_draft_applied,
+            "draft_provider_used": draft_provider_used,
+            "fallback_applied": fallback_applied,
+            "llm_error_msg": llm_error_msg,
             "awaiting_draft": draft_mode,
             "quality_before": quality_before,
             "quality_after": quality_after,
@@ -1010,6 +1165,8 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             result["next_step"] = "章节仍是占位草稿，请补全正文后再次执行 /继续写，或启用 --auto-draft。"
         elif draft_mode:
             result["next_step"] = "已尝试自动成稿但仍检测到占位标记，请手动补全正文后再执行。"
+        elif fallback_applied and llm_error_msg:
+            result["next_step"] = f"LLM写作失败({llm_error_msg})，已自动回退到模板模式。请检查API配置后重试。"
         elif gate_passed_final:
             result["next_step"] = "章节已通过门禁，可进入下一章。"
         else:
@@ -1138,13 +1295,27 @@ def parse_args() -> argparse.Namespace:
     p_cont.add_argument("--idempotent-cache", dest="idempotent_cache", action="store_true", default=True)
     p_cont.add_argument("--no-idempotent-cache", dest="idempotent_cache", action="store_false")
     p_cont.add_argument("--lock-timeout-sec", type=int, default=1800)
-    p_cont.add_argument("--min-chars", type=int, default=1200)
-    p_cont.add_argument("--min-paragraphs", type=int, default=6)
+    p_cont.add_argument("--min-chars", type=int, default=2500)  # 从1200提升至2500
+    p_cont.add_argument("--min-paragraphs", type=int, default=8)  # 从6提升至8
     p_cont.add_argument("--min-dialogue-ratio", type=float, default=0.03)
     p_cont.add_argument("--max-dialogue-ratio", type=float, default=0.7)
     p_cont.add_argument("--min-sentences", type=int, default=8)
+    p_cont.add_argument("--min-content-density", type=float, default=0.7,
+                        help="正文密度要求（排除标记、注释等），默认0.7")
+    p_cont.add_argument("--max-chapter-variance", type=float, default=0.3,
+                        help="相邻章节字数差异限制，默认0.3（30%%）")
+    p_cont.add_argument("--max-ai-phrase-density", type=float, default=0.05,
+                        help="AI高频词密度限制，默认0.05（5%%）")
     p_cont.add_argument("--auto-research", dest="auto_research", action="store_true", default=False,
                         help="写前自动检测知识缺口并提示调研")
+    p_cont.add_argument("--draft-provider", choices=["template", "llm"], default="template",
+                        help="草稿生成策略：template(模板模式,默认) 或 llm(多LLM写作)")
+    p_cont.add_argument("--llm-provider", default=None,
+                        help="LLM提供商(openai/anthropic/kimi/glm/minimax)，需配合--draft-provider llm")
+    p_cont.add_argument("--llm-model", default=None,
+                        help="LLM模型名称，需配合--draft-provider llm")
+    p_cont.add_argument("--llm-api-key", default=None,
+                        help="LLM API密钥，需配合--draft-provider llm")
     p_cont.add_argument("--emit-json")
 
     return p.parse_args()

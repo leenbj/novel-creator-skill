@@ -47,7 +47,10 @@ def read_text(path: Path, default: str = "") -> str:
         文件内容，或默认值
     """
     try:
-        return path.read_text(encoding="utf-8", errors="ignore")
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        print(f"[WARN] 文件编码问题 {path}: {e}")
+        return path.read_text(encoding="utf-8", errors="replace")
     except (FileNotFoundError, PermissionError):
         return default
 
@@ -163,6 +166,29 @@ def slugify(text: str) -> str:
 def normalize_text(text: str) -> str:
     """将连续空白替换为单个空格。"""
     return re.sub(r"\s+", " ", text).strip()
+
+
+def count_chars(text: str, include_spaces: bool = False) -> int:
+    """统计文本字符数（统一方法）。
+
+    对于中文小说，通常统计中文字符数更准确。
+    此方法同时支持：
+    - 纯中文字符统计（默认）
+    - 包含所有非空白字符统计
+
+    Args:
+        text: 输入文本
+        include_spaces: 是否包含空格和标点
+
+    Returns:
+        字符数
+    """
+    if include_spaces:
+        # 统计所有非空白字符
+        return len(re.sub(r"\s+", "", text))
+    else:
+        # 仅统计中文字符（更适合中文小说）
+        return len(re.findall(r'[\u4e00-\u9fff]', text))
 
 
 def sha1_text(text: str) -> str:

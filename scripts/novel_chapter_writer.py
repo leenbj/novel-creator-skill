@@ -181,11 +181,11 @@ class ContextExtractor:
         self.kb_dir = project_root / "02_knowledge_base"
     
     def extract_chapter_number(self, chapter_file: Path) -> int:
-        """从章节文件名提取章节号"""
+        """从章节文件名提取章节号，返回0表示未知"""
         match = re.search(r'第(\d+)章', chapter_file.name)
         if match:
             return int(match.group(1))
-        return 1
+        return 0  # 返回0表示未知，让调用者处理
     
     def extract_chapter_goal(self, chapter_file: Path) -> str:
         """从占位章节提取目标"""
@@ -537,7 +537,13 @@ class OpenAIProvider(AIProvider):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         if not HAS_OPENAI:
-            raise ImportError("未安装openai包，请运行: pip install openai")
+            raise ImportError(
+                "OpenAI SDK 导入失败\n"
+                "请检查:\n"
+                "  1) 已安装 openai 包 (pip install openai)\n"
+                "  2) Python 环境正确\n"
+                "  3) 无版本冲突 (pip check)"
+            )
         
         api_key = config.get('openai_api_key') or os.getenv('OPENAI_API_KEY')
         if not api_key:
@@ -571,7 +577,13 @@ class AnthropicProvider(AIProvider):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         if not HAS_ANTHROPIC:
-            raise ImportError("未安装anthropic包，请运行: pip install anthropic")
+            raise ImportError(
+                "Anthropic SDK 导入失败\n"
+                "请检查:\n"
+                "  1) 已安装 anthropic 包 (pip install anthropic)\n"
+                "  2) Python 环境正确\n"
+                "  3) 无版本冲突 (pip check)"
+            )
         
         api_key = config.get('anthropic_api_key') or os.getenv('ANTHROPIC_API_KEY')
         if not api_key:
@@ -585,15 +597,13 @@ class AnthropicProvider(AIProvider):
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         """调用Claude API生成内容"""
         try:
-            # Claude使用不同的消息格式
-            full_prompt = f"{system_prompt}\n\n{user_prompt}"
-            
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
+                system=system_prompt,
                 messages=[
-                    {"role": "user", "content": full_prompt}
+                    {"role": "user", "content": user_prompt}
                 ]
             )
             return response.content[0].text

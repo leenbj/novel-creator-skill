@@ -80,9 +80,38 @@ def check_quality_report(path: Path) -> Tuple[bool, str]:
     txt = path.read_text(encoding="utf-8", errors="ignore")
     m = re.search(r"通过：\s*(True|False)", txt)
     if not m:
-        return False, "quality_report 缺少“通过：True/False”结论"
+        return False, "quality_report 缺少\"通过：True/False\"结论"
     if m.group(1) != "True":
         return False, "quality_report 显示未通过"
+
+    # P0-01: 检查段落重复度指标
+    dup_failures = []
+
+    # 解析段落唯一比例
+    unique_ratio_m = re.search(r"段落唯一比例[：:]\s*([\d.]+)", txt)
+    if unique_ratio_m:
+        try:
+            ratio = float(unique_ratio_m.group(1))
+            # 阈值 0.85
+            if ratio < 0.85:
+                dup_failures.append(f"paragraph_unique_ratio={ratio:.2%} < 0.85")
+        except ValueError:
+            pass
+
+    # 解析最大重复段落次数
+    max_dup_m = re.search(r"最大重复段落次数[：:]\s*(\d+)", txt)
+    if max_dup_m:
+        try:
+            max_dup = int(max_dup_m.group(1))
+            # 阈值 2
+            if max_dup > 2:
+                dup_failures.append(f"max_duplicate_paragraph_repeat={max_dup} > 2")
+        except ValueError:
+            pass
+
+    if dup_failures:
+        return False, "段落重复度检查失败: " + "; ".join(dup_failures)
+
     return True, "通过"
 
 

@@ -104,6 +104,11 @@ def load_character_names(project_root: Path) -> List[str]:
 
 
 def extract_relation_snippets(path: Path, terms: List[str], window: int = 2, max_hits: int = 8) -> List[str]:
+    # 参数校验
+    if window < 0:
+        raise ValueError(f"window 必须非负，当前值: {window}")
+    if max_hits < 0:
+        raise ValueError(f"max_hits 必须非负，当前值: {max_hits}")
     if not path.exists() or not terms:
         return []
     lines = read_text(path).splitlines()
@@ -298,7 +303,6 @@ def load_cache(path: Path) -> Dict[str, object]:
     except json.JSONDecodeError:
         return {"entries": {}}
     except (IOError, OSError):
-        return {"entries": {}}
         return {"entries": {}}
 
 
