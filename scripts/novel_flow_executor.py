@@ -90,6 +90,48 @@ def _calc_skip_density(text: str, paragraphs: List[str]) -> float:
     return round(total / max(len(paragraphs), 1), 3)
 
 
+def _validate_beat_text(text: str, word_target: int, max_skip_density: float) -> Dict[str, object]:
+    """校验单个 beat 正文是否达到最低展开要求。
+
+    通过条件：
+    1. 实际字数 >= word_target * 0.75（允许 25% 弹性）
+    2. 概括跳过密度 <= max_skip_density
+    """
+    body = clean_for_stats(text)
+    pure = re.sub(r"\s+", "", body)
+    char_count = len(pure)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+    min_chars = max(1, int(word_target * 0.75))
+    skip_density = _calc_skip_density(body, paragraphs)
+
+    failures: List[str] = []
+    if char_count < min_chars:
+        failures.append(f"char_count<{min_chars} (actual:{char_count}, target:{word_target})")
+    if skip_density > max_skip_density:
+        failures.append(f"skip_density>{max_skip_density:.2f} (actual:{skip_density:.3f})")
+
+    return {
+        "passed": len(failures) == 0,
+        "char_count": char_count,
+        "word_target": word_target,
+        "min_chars": min_chars,
+        "paragraph_count": len(paragraphs),
+        "skip_density": skip_density,
+        "max_skip_density": max_skip_density,
+        "failures": failures,
+    }
+
+
+def _build_retry_prompt(expand_prompt: str, retry: int, word_target: int) -> str:
+    """在重试时在原扩写提示词前追加强化要求。"""
+    header = (
+        f"\u3010\u5f3a\u5236\u91cd\u5199 - \u7b2c{retry}\u6b21\u3011\u4e0a\u4e00\u7248\u672c\u5b57\u6570\u4e0d\u8db3\u6216\u4f7f\u7528\u4e86\u6982\u62ec\u8df3\u8fc7\u53e5\uff0c\u672c\u6b21\u5fc5\u987b\u6ee1\u8db3\uff1a\n"
+        f"1. \u5b57\u6570\u8fbe\u5230 {word_target} \u5b57\n"
+        "2. \u6bcf\u4e2a\u65f6\u95f4\u63a8\u8fdb\u90fd\u8981\u843d\u5230\u5177\u4f53\u884c\u52a8\uff0c\u7981\u6b62\u4f7f\u7528'\u6b64\u540e/\u7ecf\u8fc7\u4e00\u756a/\u7ec3\u529f\u5927\u6210'\u7b49\u8df3\u8fc7\u53e5\n"
+        "3. \u81f3\u5c11\u5199\u51fa3\u4e2a\u5177\u4f53\u7684\u573a\u666f\u77ac\u95f4\uff08\u52a8\u4f5c-\u53cd\u5e94-\u60c5\u7eea\u94fe\u6761\uff09\n"
+        "4. \u4e0d\u5f97\u51fa\u73b0\u4efb\u4f55\u7ed3\u8bba\u5148\u884c\u3001\u7701\u7565\u8fc7\u7a0b\u7684\u53d9\u8ff0\n\n"
+    )
+    return header + expand_prompt
 def run_python(script: Path, args: List[str]) -> Tuple[int, str, str, Optional[Dict[str, object]]]:
     cmd = [sys.executable, str(script), *args]
     env = os.environ.copy()
@@ -844,9 +886,18 @@ def _generate_beat_draft(
 
     beat_count = int(b_payload.get("beat_count", 4))
 
-    # Step 2: 逐 Beat 扩写（LLM 模式或模板模式）
+    # 预加载 beat sheet，用于获取每个 beat 的 word_target
     beats_dir = project_root / "00_memory" / "beats"
     beats_dir.mkdir(parents=True, exist_ok=True)
+    sheet_path = beats_dir / f"ch{chapter_no:04d}_beat_sheet.json"
+    sheet = load_json(sheet_path, default={})
+    beats_meta: List[Dict[str, object]] = [
+        b for b in sheet.get("beats", []) if isinstance(b, dict)
+    ]
+    pacing_profile = PACING_MODE_PROFILES[pacing_depth]
+    max_skip_density = float(pacing_profile.get("max_skip_density", 0.30))
+
+    # Step 2: 逐 Beat 扩写 + Beat 级校验与重试
     draft_provider = getattr(args, "draft_provider", "template")
 
     for beat_id in range(1, beat_count + 1):
@@ -864,24 +915,91 @@ def _generate_beat_draft(
         expand_prompt = e_payload.get("expand_prompt", "")
         beat_file = beats_dir / f"ch{chapter_no:04d}_beat{beat_id:02d}_expand.md"
 
+        # 从 beat sheet 获取该 beat 的字数目标
+        beat_meta = next((b for b in beats_meta if b.get("beat_id") == beat_id), {})
+        word_target = int(e_payload.get("word_target") or beat_meta.get("word_target") or 800)
+
         if draft_provider == "llm" and expand_prompt:
             try:
                 from novel_chapter_writer import write_chapter  # type: ignore[import]
-                overrides: Dict[str, object] = {"writing_prompt": expand_prompt}
+                overrides: Dict[str, object] = {}
                 if getattr(args, "llm_provider", None):
                     overrides["ai_provider"] = args.llm_provider
                 if getattr(args, "llm_model", None):
                     overrides["model"] = args.llm_model
                 if getattr(args, "llm_api_key", None):
                     overrides["api_key"] = args.llm_api_key
-                llm_result = write_chapter(
-                    project_root,
-                    chapter_file=beat_file,
-                    config_overrides=overrides,
-                    dry_run=False,
-                )
-                if not llm_result.get("ok"):
+
+                # Beat 级校验与重试循环（最多 3 次尝试，失败降级接受继续下一 beat）
+                attempt_results: List[Dict[str, object]] = []
+                accepted = False
+                final_validation: Optional[Dict[str, object]] = None
+
+                for attempt in range(3):
+                    current_prompt = (
+                        expand_prompt if attempt == 0
+                        else _build_retry_prompt(expand_prompt, attempt, word_target)
+                    )
+                    overrides["writing_prompt"] = current_prompt
+
+                    try:
+                        llm_result = write_chapter(
+                            project_root,
+                            chapter_file=beat_file,
+                            config_overrides=overrides,
+                            dry_run=False,
+                        )
+                        llm_ok = bool(llm_result.get("ok"))
+                    except Exception as exc:
+                        attempt_results.append({
+                            "attempt": attempt + 1, "llm_ok": False,
+                            "error": repr(exc), "accepted": False,
+                        })
+                        continue
+
+                    if not llm_ok:
+                        attempt_results.append({
+                            "attempt": attempt + 1, "llm_ok": False,
+                            "error": str(llm_result.get("error", "llm_write_failed")),
+                            "accepted": False,
+                        })
+                        continue
+
+                    # LLM 写成功，立即校验 beat 正文质量
+                    beat_text = read_text(beat_file) if beat_file.exists() else ""
+                    final_validation = cast(
+                        Dict[str, object],
+                        _validate_beat_text(beat_text, word_target, max_skip_density),
+                    )
+                    attempt_results.append({
+                        "attempt": attempt + 1, "llm_ok": True,
+                        "accepted": bool(final_validation.get("passed")),
+                        "validation": final_validation,
+                    })
+
+                    if final_validation.get("passed"):
+                        accepted = True
+                        break
+                    # 未通过 → 继续下一次 attempt（最多到 attempt=2）
+
+                # 所有尝试用尽仍未通过：降级写入扩写提示词模板（保证合成不中断）
+                if not accepted and (not beat_file.exists() or not read_text(beat_file).strip()):
                     write_text(beat_file, expand_prompt)
+
+                # 将 beat 级校验结果写回 beat sheet，供后续分析
+                if beat_meta:
+                    beat_meta["generation_meta"] = {  # type: ignore[assignment]
+                        "pacing_depth": pacing_depth,
+                        "word_target": word_target,
+                        "max_skip_density": max_skip_density,
+                        "accepted": accepted,
+                        "attempt_count": len(attempt_results),
+                        "retry_count": max(0, len(attempt_results) - 1),
+                        "attempts": attempt_results,
+                        "final_validation": final_validation,
+                    }
+                    save_json(sheet_path, sheet, indent=2)
+
             except Exception:
                 write_text(beat_file, expand_prompt)
         else:
