@@ -1,6 +1,6 @@
 # Novel Claude AI - 小说创作大师
 
-> **版本**: v10.0
+> **版本**: v1.0.0
 > **状态**: 生产可用
 > **支持工具**: Claude Code / Codex / OpenCode / Gemini CLI / Antigravity
 

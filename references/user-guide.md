@@ -1,4 +1,4 @@
-# Novel Creator Skill v10.0 用户指南
+# Novel Claude AI v1.0.0 用户指南
 
 ## 目录
 
@@ -349,7 +349,7 @@ python3 scripts/auto_novel_writer.py progress \
 
 ## 7. 中途改纲续写
 
-v10.0 新增功能，当故事写到中途需要调整主线走向时使用。
+v1.0.0 新增功能，当故事写到中途需要调整主线走向时使用。
 
 ### 什么时候需要改纲
 

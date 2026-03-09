@@ -2,7 +2,7 @@
   "id": "novel-claude-ai",
   "name": "Novel Claude AI - 小说创作大师",
   "description": "中文长篇小说全流程创作技能。当用户想写小说、创作故事、续写章节、构思剧情、搭建世界观、设计人物关系、提取写作风格、仿写其他小说时使用。覆盖从模糊想法到300万字成品的完整链路。",
-  "version": "10.0.0",
+  "version": "1.0.0",
   "activation": {
     "patterns": [
       "/novel-analyze", "/novel-create",
