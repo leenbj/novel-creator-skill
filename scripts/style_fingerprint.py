@@ -343,7 +343,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-root", help="小说项目根目录；提供后会同步写入项目知识库")
     parser.add_argument(
         "--global-library",
-        default=str(Path.home() / ".codex" / "skills" / "novel-creator-skill" / "assets" / "style_library"),
+        default=str(Path.home() / ".codex" / "skills" / "novel-claude-ai" / "assets" / "style_library"),
         help="全局风格库存储目录",
     )
     parser.add_argument("--top-n", type=int, default=12, help="高频短语数量")
