@@ -122,6 +122,46 @@
 - 新增硬校验：`quality_report.md` 必须存在且结论为 `通过：True`。
 - 产物：`04_editing/gate_artifacts/<chapter_id>/gate_result.json`
 
+## 8. 改纲与维护命令
+
+`/改纲续写`
+- **适用场景**：在故事进行中发现主线走向需调整，修改 `novel_plan.md` 后必须执行此命令重新对齐三层索引（大纲锚点 / 知识图谱 / RAG），然后才能继续写作。
+- **执行顺序**：手动编辑 `novel_plan.md` → 执行 `/改纲续写` → 查阅影响报告 → `/继续写`
+- **执行**：
+  ```bash
+  python3 scripts/novel_flow_executor.py revise-outline \
+    --project-root <项目目录> \
+    --from-chapter <起始章节号> \
+    [--change-description "<改纲说明>"] \
+    [--emit-json]
+  ```
+- **参数**：
+
+  | 参数 | 类型 | 必选 | 说明 |
+  |------|------|------|------|
+  | `--project-root` | 路径 | 是 | 小说项目根目录，须包含 `00_memory/novel_plan.md` |
+  | `--from-chapter` | 整数（≥1） | 是 | 改纲影响的起始章节号（含该章节） |
+  | `--change-description` | 字符串 | 否 | 本次改纲的简要说明，写入影响报告 |
+  | `--emit-json` | 开关 | 否 | 将 JSON 结果追加到 stdout（供脚本解析） |
+
+- **三步级联流程**：
+  1. **锚点重算**（Step 1，必须成功）：备份当前 `outline_anchors.json` 至 `.flow/backup_anchors_<时间戳>.json`，再从改纲后的 `novel_plan.md` 重新计算大纲锚点
+  2. **图谱级联标记**（Step 2，依赖 Step 1 成功）：将 `last_updated >= from_chapter` 的知识图谱节点标记为 `cascade_pending=True`，受影响的边（`since_chapter >= from_chapter`）同步标记；生成结构化级联影响报告
+  3. **RAG 索引重建**（Step 3，依赖 Step 1 成功）：调用 `plot_rag_retriever.py build` 全量重建检索索引
+
+- **成功判定**：`ok = anchors_recalculated AND report_written`（图谱标记失败或 RAG 构建失败为软失败，不影响 `ok` 字段）
+- **产物**：
+  - `.flow/backup_anchors_<时间戳>.json` — 改纲前的锚点备份（可用于回滚）
+  - `00_memory/outline_anchors.json` — 重算后的新锚点文件
+  - `00_memory/revise_outline_report.md` — 本次改纲影响范围报告
+- **图谱级联子命令**（仅脚本层，`/改纲续写` 内部调用）：
+  ```bash
+  python3 scripts/story_graph_updater.py cascade \
+    --project-root <项目目录> \
+    --from-chapter <N> \
+    [--change-description "<说明>"]
+  ```
+
 ## 7. 评测基线
 `/评测基线`（脚本入口）
 - 输入：项目目录、评测轮数。

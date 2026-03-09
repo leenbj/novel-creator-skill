@@ -1,4 +1,4 @@
-# Novel Creator Skill v8.0 用户指南
+# Novel Creator Skill v10.0 用户指南
 
 ## 目录
 
@@ -8,8 +8,9 @@
 4. [新手三命令](#4-新手三命令)
 5. [联网调研](#5-联网调研)
 6. [一键写书](#6-一键写书)
-7. [进阶用法](#7-进阶用法)
-8. [常见问题](#8-常见问题)
+7. [中途改纲续写](#7-中途改纲续写)
+8. [进阶用法](#8-进阶用法)
+9. [常见问题](#9-常见问题)
 
 ---
 
@@ -346,7 +347,85 @@ python3 scripts/auto_novel_writer.py progress \
 
 ---
 
-## 7. 进阶用法
+## 7. 中途改纲续写
+
+v10.0 新增功能，当故事写到中途需要调整主线走向时使用。
+
+### 什么时候需要改纲
+
+- 发现当前大纲的某段剧情走向不对，需要修改 `novel_plan.md`
+- 预计修改会影响已标注在知识图谱中的角色状态、事件记录或伏笔
+- 修改完 `novel_plan.md` 后，需要在重新开始写作**之前**对齐系统的三层索引
+
+> ⚠️ 直接修改 `novel_plan.md` 而不执行 `/改纲续写` 会导致大纲锚点与实际规划不一致，使后续门禁配额校验失准。
+
+### 使用步骤
+
+**步骤 1**：编辑主线计划文件
+
+```bash
+# 直接编辑改纲内容
+vim 你的小说项目/00_memory/novel_plan.md
+```
+
+修改你希望变更的剧情章节、结局设定或情节节点。
+
+**步骤 2**：执行改纲续写命令
+
+```
+/改纲续写 --from-chapter=<起始章节号> --change-description="<说明>"
+```
+
+等效脚本：
+
+```bash
+python3 scripts/novel_flow_executor.py revise-outline \
+  --project-root ./你的小说 \
+  --from-chapter 35 \
+  --change-description "第35章起调整主线：反派提前登场，男主阵营裂变"
+```
+
+**步骤 3**：查阅影响报告
+
+改纲完成后，系统在项目目录生成 `00_memory/revise_outline_report.md`，内容包含：
+- 本次改纲涉及的卷数与总章节数
+- 知识图谱中被标记为 `cascade_pending=True` 的节点与边数量
+- RAG 索引重建状态
+
+**步骤 4**：处理级联节点（可选但推荐）
+
+对 `cascade_pending=True` 的节点，手动审查其记录的角色状态、事件信息是否与新大纲一致，必要时更新后将 `cascade_pending` 恢复为 `False`。
+
+**步骤 5**：恢复正常写作
+
+```
+/继续写 "（本次改纲后的第一章新剧情）"
+```
+
+### 执行结果说明
+
+| 字段 | 含义 |
+|------|------|
+| `ok: true` | 锚点重算成功且报告已写入，可以继续写作 |
+| `ok: false` | 锚点重算失败（通常是 `novel_plan.md` 格式有误），需修正后重试 |
+| `cascade.ok: false` 但 `ok: true` | 图谱标记软失败，不阻断流程，建议手动检查图谱文件 |
+| `rag.ok: false` 但 `ok: true` | RAG 索引重建软失败，不阻断流程，可手动执行 `/更新剧情索引` |
+
+### 备份与回滚
+
+改纲前，系统自动备份原锚点文件至 `.flow/backup_anchors_<时间戳>.json`。如需回滚改纲：
+
+```bash
+# 查看备份列表
+ls .flow/backup_anchors_*.json
+
+# 手动恢复
+cp .flow/backup_anchors_20260309_143022.json 00_memory/outline_anchors.json
+```
+
+---
+
+## 8. 进阶用法
 
 ### 风格定制
 
@@ -408,7 +487,7 @@ python3 scripts/benchmark_novel_flow.py \
 
 ---
 
-## 8. 常见问题
+## 9. 常见问题
 
 ### Q: 安装后命令不生效？
 A: 确认安装脚本输出无错误。重启 AI 工具后重试。检查 SKILL.md 是否被正确链接到工具的 skill 目录。
