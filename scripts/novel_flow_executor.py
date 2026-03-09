@@ -63,6 +63,32 @@ FLOW_CACHE_FILE = "continue_write_cache.json"
 FLOW_SNAPSHOT_DIR = "snapshots"
 FLOW_CACHE_MAX_ENTRIES = 200
 
+# 节奏模式配置 — 映射到最低章节字数与 beat 扩写深度
+PACING_MODE_PROFILES: Dict[str, Any] = {
+    # fast/standard 不改变现有默认字数门槛，仅靠 Beat 扩写约束改善质量
+    # immersive 显著提升字数要求，适合需要强代入感的正剧/慢热风格
+    "fast":      {"min_chars": 2500, "beat_pacing_depth": "fast",      "max_skip_density": 0.40},
+    "standard":  {"min_chars": 2500, "beat_pacing_depth": "standard",  "max_skip_density": 0.30},
+    "immersive": {"min_chars": 4500, "beat_pacing_depth": "immersive", "max_skip_density": 0.15},
+}
+
+# 概括跳过词正则（与 chapter_synthesizer.py 保持同步）
+_FLOW_PACING_SKIP_PATTERNS = [
+    r"(?:此后|随后|转眼|一晃|没过多久|几天后|数日后|几个月后|数月后|又过了)",
+    r"(?:经过一番|经过数轮|花了[一二三四五六七八九十百\d两]+[天日月年]|苦修[一二三四五六七八九十百\d两]*[天日月年]?)",
+    r"(?:练功大成|很快(?:就|便)|就这样(?:结束|过去)|不知不觉(?:就)?(?:完成|突破|成功))",
+]
+
+
+def _resolve_pacing_mode(value: Optional[str]) -> str:
+    return value if value in PACING_MODE_PROFILES else "standard"
+
+
+def _calc_skip_density(text: str, paragraphs: List[str]) -> float:
+    """计算概括跳过词密度（hits / paragraphs），用于检测剧情飞速推进。"""
+    total = sum(len(re.findall(p, text)) for p in _FLOW_PACING_SKIP_PATTERNS)
+    return round(total / max(len(paragraphs), 1), 3)
+
 
 def run_python(script: Path, args: List[str]) -> Tuple[int, str, str, Optional[Dict[str, object]]]:
     cmd = [sys.executable, str(script), *args]
@@ -590,6 +616,19 @@ def evaluate_quality(text: str, args: argparse.Namespace) -> Dict[str, object]:
             f"max_duplicate_paragraph_repeat>{max_dup_repeat} (current: {max_duplicate_paragraph_repeat})"
         )
 
+    # 概括跳过密度检查（immersive 模式为硬失败，其他模式仅记录）
+    pacing_mode_val = _resolve_pacing_mode(getattr(args, "pacing_mode", "standard"))
+    pacing_p = PACING_MODE_PROFILES[pacing_mode_val]
+    para_list = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
+    skip_density = _calc_skip_density(body, para_list)
+    max_skip = float(pacing_p.get("max_skip_density", 0.30))
+    skip_density_exceeded = skip_density > max_skip
+    if skip_density_exceeded and pacing_mode_val == "immersive":
+        failures.append(
+            f"pacing_skip_density_too_high ({skip_density:.2f}/para, max: {max_skip:.2f}) "
+            f"— 检测到概括跳过叙述，immersive 模式须展开每个场景过程"
+        )
+
     return {
         "char_count": char_count,
         "paragraph_count": paragraph_count,
@@ -603,6 +642,9 @@ def evaluate_quality(text: str, args: argparse.Namespace) -> Dict[str, object]:
         "max_duplicate_paragraph_repeat": max_duplicate_paragraph_repeat,
         "unique_paragraph_count": unique_paragraph_count,
         "ai_phrase_hits": ai_phrase_hits,
+        "pacing_mode": pacing_mode_val,
+        "skip_density": skip_density,
+        "skip_density_exceeded": skip_density_exceeded,
         "passed": len(failures) == 0,
         "failures": failures,
     }
@@ -785,6 +827,8 @@ def _generate_beat_draft(
     """
     chapter_goal = query[:200]  # 截断保证参数合法
 
+    pacing_depth = _resolve_pacing_mode(getattr(args, "pacing_mode", "standard"))
+
     # Step 1: 生成 Beat Sheet 骨架
     b_code, _b_out, _b_err, b_payload = run_python(
         SCRIPT_DIR / "beat_sheet_generator.py",
@@ -792,6 +836,7 @@ def _generate_beat_draft(
          "--project-root", str(project_root),
          "--chapter", str(chapter_no),
          "--chapter-goal", chapter_goal,
+         "--pacing-depth", pacing_depth,
          "--beat-count", str(getattr(args, "beat_count", 4))],
     )
     if b_code != 0 or not isinstance(b_payload, dict) or not b_payload.get("ok"):
@@ -810,6 +855,7 @@ def _generate_beat_draft(
             ["expand",
              "--project-root", str(project_root),
              "--chapter", str(chapter_no),
+             "--pacing-depth", pacing_depth,
              "--beat-id", str(beat_id)],
         )
         if e_code != 0 or not isinstance(e_payload, dict):
@@ -1250,6 +1296,11 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
 
     started_at = time.time()
     query = args.query.strip() if args.query else "推进下一章剧情"
+    # 节奏模式：同步提升最低字数门槛
+    pacing_mode = _resolve_pacing_mode(getattr(args, "pacing_mode", "standard"))
+    args.pacing_mode = pacing_mode
+    pacing_profile = PACING_MODE_PROFILES[pacing_mode]
+    args.min_chars = max(args.min_chars, int(pacing_profile["min_chars"]))
     chapter_path: Optional[Path] = None
     original_chapter_path: Optional[Path] = None
     chapter_hash_before = ""
@@ -1626,6 +1677,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             "command": "continue-write",
             "project_root": str(project_root),
             "chapter_file": str(chapter_path) if chapter_path else "",
+            "pacing_mode": pacing_mode,
             "created_chapter_stub": created_chapter_stub,
             "auto_draft_applied": auto_draft_applied,
             "draft_provider_used": draft_provider_used,
@@ -2097,6 +2149,13 @@ def parse_args() -> argparse.Namespace:
     p_cont.add_argument("--lock-timeout-sec", type=int, default=1800)
     p_cont.add_argument("--min-chars", type=int, default=2500)  # 从1200提升至2500
     p_cont.add_argument("--min-paragraphs", type=int, default=8)  # 从6提升至8
+    p_cont.add_argument(
+        "--pacing-mode", choices=["fast", "standard", "immersive"], default="standard",
+        help=(
+            "章节节奏模式。fast=2000字/宽松约束，standard=2500字/均衡，"
+            "immersive=4500字/强制沉浸展开。影响 Beat 扩写硬约束强度和最低章节字数。"
+        ),
+    )
     p_cont.add_argument("--min-dialogue-ratio", type=float, default=0.03)
     p_cont.add_argument("--max-dialogue-ratio", type=float, default=0.7)
     p_cont.add_argument("--min-sentences", type=int, default=8)

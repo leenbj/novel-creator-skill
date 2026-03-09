@@ -24,6 +24,53 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from common import count_chars, ensure_dir, load_json, read_text, save_json, write_text
 
+# -- 节奏检测 ---------------------------------------------------------------
+
+# 按节奏模式设定校验阈值
+PACING_PROFILES: Dict[str, Any] = {
+    "fast": {
+        "min_chapter_chars": 2500,
+        "max_skip_density": 0.35,   # 每段平均允许的跳过词频率上限
+        "min_avg_chars_per_paragraph": 45,
+    },
+    "standard": {
+        "min_chapter_chars": 3000,
+        "max_skip_density": 0.25,
+        "min_avg_chars_per_paragraph": 50,
+    },
+    "immersive": {
+        "min_chapter_chars": 4500,
+        "max_skip_density": 0.15,
+        "min_avg_chars_per_paragraph": 80,
+    },
+}
+
+# 概括跳过词正则（用于检测"剧情飞速推进"信号）
+_PACING_SKIP_PATTERNS: List[tuple] = [
+    ("time_skip",    r"(?:此后|随后|转眼|一晃|没过多久|几天后|数日后|几个月后|数月后|又过了)"),
+    ("summary_skip", r"(?:经过一番|经过数轮|花了[一二三四五六七八九十百\d两]+[天日月年]|苦修[一二三四五六七八九十百\d两]*[天日月年]?)"),
+    ("result_only",  r"(?:练功大成|很快(?:就|便)|就这样(?:结束|过去)|不知不觉(?:就)?(?:完成|突破|成功))"),
+]
+
+
+def _resolve_pacing_mode(value: str) -> str:
+    return value if value in PACING_PROFILES else "standard"
+
+
+def _check_pacing_skip(text: str, paragraphs: List[str]) -> Dict[str, Any]:
+    """检测概括性跳过叙述密度。返回命中次数、段落密度和分类明细。"""
+    import re as _re
+    hits: List[Dict[str, Any]] = []
+    total_hits = 0
+    for label, pattern in _PACING_SKIP_PATTERNS:
+        count = len(_re.findall(pattern, text))
+        if count > 0:
+            hits.append({"label": label, "count": count})
+            total_hits += count
+    density = round(total_hits / max(len(paragraphs), 1), 3)
+    return {"total_hits": total_hits, "density": density, "hits": hits}
+
+
 # -- 配置 ------------------------------------------------------------------
 
 @dataclass
@@ -227,18 +274,29 @@ def cmd_validate(args: argparse.Namespace, cfg: SynthConfig) -> Dict[str, Any]:
     text = read_text(synth_path)
     chars = count_chars(text)
     paragraphs = [p.strip() for p in text.split("\n") if p.strip() and not p.startswith("#")]
+    pacing_mode = _resolve_pacing_mode(getattr(args, "pacing_mode", "standard"))
+    pacing_profile = PACING_PROFILES[pacing_mode]
     errors: List[str] = []
     warnings: List[str] = []
 
-    # 字数检查
-    if chars < cfg.min_chapter_chars:
-        errors.append(f"字数不足: {chars} 字（最低 {cfg.min_chapter_chars}）")
+    # 字数检查（取配置值与节奏模式阈值中的较大值）
+    min_chars = max(cfg.min_chapter_chars, pacing_profile["min_chapter_chars"])
+    if chars < min_chars:
+        errors.append(f"字数不足: {chars} 字（{pacing_mode} 模式最低 {min_chars}）")
     if chars > cfg.max_chapter_chars:
         warnings.append(f"字数偏多: {chars} 字（建议 <= {cfg.max_chapter_chars}）")
 
     # 段落数检查
     if len(paragraphs) < 5:
         warnings.append(f"段落过少: {len(paragraphs)} 段（建议 >= 5）")
+
+    # 段落平均字数检查（过短说明内容稀薄）
+    avg_chars_per_paragraph = round(chars / max(len(paragraphs), 1), 1)
+    if avg_chars_per_paragraph < pacing_profile["min_avg_chars_per_paragraph"]:
+        warnings.append(
+            f"段落平均字数偏低: {avg_chars_per_paragraph} 字/段"
+            f"（{pacing_mode} 模式建议 >= {pacing_profile['min_avg_chars_per_paragraph']}）"
+        )
 
     # 章末钩子检查
     hook = _check_hook(text, cfg)
@@ -252,6 +310,15 @@ def cmd_validate(args: argparse.Namespace, cfg: SynthConfig) -> Dict[str, Any]:
     if dialogue_ratio < 0.05:
         warnings.append(f"对话占比偏低: {dialogue_ratio:.1%}（建议 >= 5%）")
 
+    # 概括跳过密度检查
+    pacing_skip = _check_pacing_skip(text, paragraphs)
+    if pacing_skip["density"] > pacing_profile["max_skip_density"]:
+        warnings.append(
+            f"概括跳过密度偏高: {pacing_skip['density']:.2f} 次/段"
+            f"（{pacing_mode} 模式建议 <= {pacing_profile['max_skip_density']:.2f}）"
+            "——请检查是否有大量'此后X天''经过一番'等跳过句"
+        )
+
     # 残留模板标记检查
     template_markers = ["[待填充]", "扩写指令", "Beat {"]
     for marker in template_markers:
@@ -263,10 +330,13 @@ def cmd_validate(args: argparse.Namespace, cfg: SynthConfig) -> Dict[str, Any]:
         "command": "validate",
         "chapter_file": str(synth_path),
         "chapter": chapter,
+        "pacing_mode": pacing_mode,
         "chars": chars,
+        "avg_chars_per_paragraph": avg_chars_per_paragraph,
         "paragraphs": len(paragraphs),
         "dialogue_ratio": round(dialogue_ratio, 3),
         "hook": hook,
+        "pacing_skip": pacing_skip,
         "errors": errors,
         "warnings": warnings,
         "passed": len(errors) == 0,
@@ -287,6 +357,10 @@ def parse_args() -> argparse.Namespace:
     s.add_argument("--project-root", required=True)
     s.add_argument("--chapter", type=int, required=True)
     s.add_argument("--chapter-file", default="", help="手动指定章节文件路径")
+    s.add_argument(
+        "--pacing-mode", choices=["fast", "standard", "immersive"], default="standard",
+        help="节奏模式：影响最低字数和概括跳过密度阈值",
+    )
 
     return p.parse_args()
 
