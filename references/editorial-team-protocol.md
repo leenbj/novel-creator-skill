@@ -1,6 +1,6 @@
 # 编辑团队协议（Editorial Team Protocol）
 
-> 对应 SKILL.md v9.0 Section 11
+> 对应 SKILL.md v10.0 Section 11
 
 ## 设计动机
 

@@ -12,8 +12,8 @@ usage() {
 
 示例：
   install-portable-skill.sh --tool codex
-  install-portable-skill.sh --tool claude-code --dest ~/.claude/skills/novel-creator-skill
-  install-portable-skill.sh --tool gemini-cli --dest ~/.gemini/skills/novel-creator-skill --force
+  install-portable-skill.sh --tool claude-code --dest ~/.claude/skills/novel-claude-ai
+  install-portable-skill.sh --tool gemini-cli --dest ~/.gemini/skills/novel-claude-ai --force
 USAGE
 }
 
