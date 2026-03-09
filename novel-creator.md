@@ -1,4 +1,4 @@
-# 小说创作大师（Novel Creator）
+# Novel Claude AI - 小说创作大师
 
 > 本文件为旧版入口兼容说明。完整流程、命令说明与脚本用法以 **`SKILL.md`** 为准。
 

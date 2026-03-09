@@ -12,7 +12,7 @@ import re
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Dict, Generator, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple
 
 # 预编译正则表达式（全局复用）
 _CHARS_RE = re.compile(r"[\u4e00-\u9fff]{2,}")

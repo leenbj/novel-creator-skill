@@ -54,16 +54,37 @@ SRC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 default_dest() {
   case "$1" in
-    codex) echo "$HOME/.codex/skills/novel-creator-skill" ;;
-    claude-code) echo "$HOME/.claude/skills/novel-creator-skill" ;;
-    opencode) echo "$HOME/.opencode/skills/novel-creator-skill" ;;
-    gemini-cli) echo "$HOME/.gemini/skills/novel-creator-skill" ;;
-    antigravity) echo "$HOME/.antigravity/skills/novel-creator-skill" ;;
+    codex) echo "$HOME/.codex/skills/novel-claude-ai" ;;
+    claude-code) echo "$HOME/.claude/skills/novel-claude-ai" ;;
+    opencode) echo "$HOME/.opencode/skills/novel-claude-ai" ;;
+    gemini-cli) echo "$HOME/.gemini/skills/novel-claude-ai" ;;
+    antigravity) echo "$HOME/.antigravity/skills/novel-claude-ai" ;;
     *)
       echo "不支持的工具: $1" >&2
       exit 2
       ;;
   esac
+}
+
+is_protected_dest() {
+  local raw="$1"
+  local trimmed="${raw%/}"
+
+  # 禁止危险目标：空路径、根目录、HOME、当前目录
+  if [[ -z "$trimmed" || "$trimmed" == "/" || "$trimmed" == "$HOME" || "$trimmed" == "." ]]; then
+    return 0
+  fi
+
+  # 若路径已存在，检查规范化后的真实路径
+  if [[ -e "$raw" ]]; then
+    local resolved=""
+    resolved="$(cd "$raw" 2>/dev/null && pwd -P || true)"
+    if [[ -z "$resolved" || "$resolved" == "/" || "$resolved" == "$HOME" ]]; then
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
 if [[ -z "$DEST" ]]; then
@@ -77,6 +98,10 @@ if [[ -e "$DEST" && "$FORCE" != "1" ]]; then
 fi
 
 if [[ -e "$DEST" && "$FORCE" == "1" ]]; then
+  if is_protected_dest "$DEST"; then
+    echo "拒绝删除危险路径: $DEST" >&2
+    exit 4
+  fi
   rm -rf "$DEST"
 fi
 
@@ -91,6 +116,37 @@ copy_core() {
   cp -R "$SRC_DIR/scripts" "$DEST/"
   # 可选目录，存在时才复制
   [[ -d "$SRC_DIR/assets" ]] && cp -R "$SRC_DIR/assets" "$DEST/" || true
+}
+
+# Claude Code 专属：安装 Agent 定义文件到 ~/.claude/agents/
+install_claude_agents() {
+  local agents_src="$SRC_DIR/.claude/agents"
+  if [[ ! -d "$agents_src" ]]; then
+    return 0
+  fi
+
+  local agents_dest="$HOME/.claude/agents"
+  mkdir -p "$agents_dest"
+
+  local installed=0
+  for agent_file in "$agents_src"/*.md; do
+    [[ -f "$agent_file" ]] || continue
+    local agent_name
+    agent_name="$(basename "$agent_file")"
+    local target="$agents_dest/$agent_name"
+
+    if [[ -f "$target" && "$FORCE" != "1" ]]; then
+      echo "[agents] 跳过（已存在，使用 --force 覆盖）：$target"
+    else
+      cp "$agent_file" "$target"
+      echo "[agents] 已安装：$target"
+      installed=$((installed + 1))
+    fi
+  done
+
+  if [[ $installed -gt 0 ]]; then
+    echo "[agents] 共安装 $installed 个编辑团队 Agent 到 $agents_dest"
+  fi
 }
 
 write_entry() {
@@ -179,6 +235,11 @@ JSON
 copy_core
 write_entry "$TOOL"
 write_manifest
+
+# Claude Code 额外安装 Agent 文件
+if [[ "$TOOL" == "claude-code" ]]; then
+  install_claude_agents
+fi
 
 echo "安装完成"
 echo "tool=$TOOL"

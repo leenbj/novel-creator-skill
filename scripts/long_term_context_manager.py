@@ -10,11 +10,14 @@
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -165,11 +168,12 @@ class LongTermContextManager:
                         word_count=meta.get('word_count', 0)
                     )
                     summaries.append(summary)
-                except Exception:
+                except Exception as exc:
+                    logger.warning("解析章节元数据失败: %s (%s)", meta_file, exc)
                     continue
-        
+
         return summaries
-    
+
     def _get_chapter_summaries_from_files(self, chapter_no: int, window_size: int) -> List[ChapterSummary]:
         """从章节文件直接提取摘要"""
         summaries = []
@@ -213,9 +217,10 @@ class LongTermContextManager:
                         word_count=len(clean_content)
                     )
                     summaries.append(summary_obj)
-                except Exception:
+                except Exception as exc:
+                    logger.warning("读取章节文件失败: %s (%s)", chapter_file, exc)
                     continue
-        
+
         return summaries
     
     def _get_character_states(self, chapter_no: int) -> Dict[str, CharacterState]:
@@ -259,9 +264,9 @@ class LongTermContextManager:
                                 other, relation = value.split(':', 1)
                                 states[current_char].relationships[other.strip()] = relation.strip()
         
-        except Exception:
-            pass
-        
+        except Exception as exc:
+            logger.warning("解析角色状态失败: %s (%s)", tracker_file, exc)
+
         return states
     
     def _get_plot_threads(self, chapter_no: int) -> List[PlotThread]:
@@ -301,10 +306,10 @@ class LongTermContextManager:
                         key_chapters=[]
                     )
                     threads.append(thread)
-        
-        except Exception:
-            pass
-        
+
+        except Exception as exc:
+            logger.warning("解析情节线索失败: %s (%s)", foreshadow_file, exc)
+
         return threads
     
     def _get_world_state(self, chapter_no: int) -> Dict[str, Any]:
@@ -326,10 +331,10 @@ class LongTermContextManager:
                 if ':' in line and not line.startswith('#'):
                     key, value = line.split(':', 1)
                     world_state[key.strip()] = value.strip()
-        
-        except Exception:
-            pass
-        
+
+        except Exception as exc:
+            logger.warning("解析世界状态失败: %s (%s)", world_file, exc)
+
         return world_state
     
     def should_refresh_context(self, chapter_no: int) -> bool:

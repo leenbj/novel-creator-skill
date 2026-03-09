@@ -14,7 +14,7 @@ import json
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 SENTENCE_SPLIT_RE = re.compile(r"[。！？!?]+")
@@ -291,7 +291,10 @@ def collect_metrics(text: str, top_n: int) -> Dict[str, object]:
     }
 
 
-def update_project_files(project_root: Path, profile_name: str, slug: str, profile_md: str) -> Dict[str, str]:
+def update_project_files(
+    project_root: Path, profile_name: str, slug: str, profile_md: str,
+    metrics: Optional[Dict[str, object]] = None,
+) -> Dict[str, str]:
     outputs = {}
 
     profile_file = project_root / "00_memory" / "style_profiles" / f"{slug}.md"
@@ -300,9 +303,23 @@ def update_project_files(project_root: Path, profile_name: str, slug: str, profi
     outputs["project_profile"] = str(profile_file)
 
     anchor_file = project_root / "00_memory" / "style_anchor.md"
+    # 写入 novel_chapter_writer.py 解析所需的三个字段（视角/句式/对话）
+    _m = metrics or {}
+    _dialogue_ratio = float(_m.get("dialogue_ratio", 0.0) or 0.0)
+    _avg_sentence = _m.get("avg_sentence_chars", 0)
+    _avg_para = _m.get("avg_paragraph_chars", 0)
+    _perspective = _m.get("perspective_label", "未知")
+    _dialogue_desc = (
+        "高对话驱动，对白承担主要推进功能" if _dialogue_ratio >= 0.45
+        else "叙述与对话均衡" if _dialogue_ratio >= 0.2
+        else "低对话占比，以叙述和动作描写为主"
+    )
     anchor_body = f"""- 当前生效风格：{profile_name}
 - 最近更新：自动由 style_fingerprint.py 生成
 - 建议：写前检查句长、对话占比、叙述视角一致性。
+- 视角：{_perspective}
+- 句式：平均句长约 {_avg_sentence} 字，段落平均 {_avg_para} 字
+- 对话：{_dialogue_desc}（占比 {_dialogue_ratio:.2%}）
 """
     upsert_section(anchor_file, f"当前生效风格：{profile_name}", anchor_body, "风格锚点")
     outputs["style_anchor"] = str(anchor_file)
@@ -371,7 +388,7 @@ def main() -> int:
 
     if args.project_root:
         project_root = Path(args.project_root).expanduser().resolve()
-        outputs.update(update_project_files(project_root, profile_name, slug, md))
+        outputs.update(update_project_files(project_root, profile_name, slug, md, metrics))
 
     result = {
         "profile_name": profile_name,

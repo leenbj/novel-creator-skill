@@ -1,0 +1,15 @@
+{
+  "runs": [
+    {
+      "ts": "2026-03-08 18:41:45",
+      "ok": false,
+      "gate_passed_final": false,
+      "runtime_ms": 515.45,
+      "query_length": 17,
+      "retrieval_context_chars": 74,
+      "retrieval_candidates": 1,
+      "auto_retry_actions_count": 3,
+      "idempotent_hit": false
+    }
+  ]
+}

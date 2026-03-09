@@ -1,0 +1,11 @@
+{
+  "updated_at": "2026-03-08 18:41:45",
+  "total_runs": 1,
+  "ok_rate": 0.0,
+  "gate_pass_rate": 0.0,
+  "retry_rate": 1.0,
+  "idempotent_hit_rate": 0.0,
+  "avg_runtime_ms": 515.45,
+  "avg_retrieval_context_chars": 74.0,
+  "avg_retrieval_candidates": 1.0
+}

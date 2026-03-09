@@ -1,0 +1,68 @@
+{
+  "generated_at": "2026-03-08 18:41:45",
+  "project_root": "/Users/ethan/Desktop/小说/novel-creator-skill",
+  "chapter_count": 2,
+  "reused_docs": 1,
+  "rebuilt_docs": 1,
+  "cleaned_meta_files": 0,
+  "character_sig": "da39a3ee5e6b4b0d",
+  "docs": [
+    {
+      "chapter_file": "第1章-开篇待写.md",
+      "chapter_path": "/Users/ethan/Desktop/小说/novel-creator-skill/03_manuscript/第1章-开篇待写.md",
+      "chapter_no": 1,
+      "mtime": 1772966504.6585677,
+      "summary": "# 第1章 开篇 <!-- NOVEL_FLOW_STUB --> ## 本章目标 - 建立主角目标：明确主角核心目标 - 落地核心冲突：主线冲突待细化 ## 场景草图 - 起始地点： - 冲突触发点： - 章末钩子： ## 正文 [待写]",
+      "entities": [],
+      "keywords": [
+        "目标",
+        "冲突",
+        "主角",
+        "核心",
+        "开篇",
+        "本章",
+        "章目",
+        "本章目",
+        "章目标",
+        "本章目标",
+        "建立",
+        "立主",
+        "角目",
+        "建立主",
+        "立主角",
+        "主角目",
+        "角目标",
+        "建立主角",
+        "立主角目",
+        "主角目标"
+      ],
+      "meta_file": "/Users/ethan/Desktop/小说/novel-creator-skill/00_memory/retrieval/chapter_meta/第1章-开篇待写.meta.json",
+      "events": [
+        "冲突"
+      ],
+      "locations": [],
+      "foreshadow_refs": [],
+      "conflict_level": "medium"
+    },
+    {
+      "chapter_file": "第2章-待写.md",
+      "chapter_path": "/Users/ethan/Desktop/小说/novel-creator-skill/03_manuscript/第2章-待写.md",
+      "chapter_no": 2,
+      "mtime": 1772966504.8915594,
+      "summary": "# 第2章 待写 <!-- NOVEL_FLOW_STUB --> ## 正文 [待写]",
+      "entities": [],
+      "keywords": [
+        "待写",
+        "正文",
+        "novel",
+        "flow",
+        "stub"
+      ],
+      "meta_file": "/Users/ethan/Desktop/小说/novel-creator-skill/00_memory/retrieval/chapter_meta/第2章-待写.meta.json",
+      "events": [],
+      "locations": [],
+      "foreshadow_refs": [],
+      "conflict_level": "unknown"
+    }
+  ]
+}

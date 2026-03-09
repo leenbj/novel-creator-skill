@@ -84,6 +84,15 @@ scripts/
   gate_repair_plan.py       # 失败修复计划生成
   benchmark_novel_flow.py   # 基线评测
   style_fingerprint.py      # 风格指纹提取
+  story_graph_builder.py    # 知识图谱 CRUD / 校验 / Mermaid 导出
+  outline_anchor_manager.py # 大纲锚点初始化 / 配额检查 / 推进
+  event_matrix_scheduler.py # 事件矩阵冷却 / 推荐 / 记录
+  anti_resolution_guard.py  # 反向刹车校验 / 约束 prompt 生成
+  beat_sheet_generator.py   # Beat Sheet 生成 / 扩写提示 / 校验
+  chapter_synthesizer.py    # 章节合成 / 合成稿质量校验
+  cross_agent_reviewer.py   # 跨Agent审核任务生成 / 结果记录
+  story_graph_updater.py    # 章节完成后自动提取信息更新图谱
+  interactive_ideation_engine.py  # 交互式脑洞引导 5 轮收敛 / 产出物生成
   test_novel_flow_executor.py  # 端到端回归测试
   install-portable-skill.sh # 跨工具安装脚本
   common.py                 # 共享工具函数（所有脚本共用）

@@ -1,0 +1,78 @@
+{
+  "checked_at": "2026-03-08 18:41:45",
+  "project_root": "/Users/ethan/Desktop/小说/novel-creator-skill",
+  "chapter_file": "/Users/ethan/Desktop/小说/novel-creator-skill/03_manuscript/第2章-待写.md",
+  "chapter_id": "第2章-待写",
+  "passed": false,
+  "checks": [
+    {
+      "name": "chapter_storage_policy",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/03_manuscript/第2章-待写.md",
+      "ok": true,
+      "message": "通过"
+    },
+    {
+      "name": "knowledge_base_isolation",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/02_knowledge_base",
+      "ok": true,
+      "message": "通过"
+    },
+    {
+      "name": "memory_update",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/04_editing/gate_artifacts/第2章-待写/memory_update.md",
+      "ok": false,
+      "message": "文件时间早于章节文件，疑似未执行最新流程"
+    },
+    {
+      "name": "consistency_report",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/04_editing/gate_artifacts/第2章-待写/consistency_report.md",
+      "ok": false,
+      "message": "文件时间早于章节文件，疑似未执行最新流程"
+    },
+    {
+      "name": "style_calibration",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/04_editing/gate_artifacts/第2章-待写/style_calibration.md",
+      "ok": false,
+      "message": "文件时间早于章节文件，疑似未执行最新流程"
+    },
+    {
+      "name": "copyedit_report",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/04_editing/gate_artifacts/第2章-待写/copyedit_report.md",
+      "ok": false,
+      "message": "文件时间早于章节文件，疑似未执行最新流程"
+    },
+    {
+      "name": "publish_ready",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/04_editing/gate_artifacts/第2章-待写/publish_ready.md",
+      "ok": false,
+      "message": "文件时间早于章节文件，疑似未执行最新流程"
+    },
+    {
+      "name": "quality_report",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/04_editing/gate_artifacts/第2章-待写/quality_report.md",
+      "ok": true,
+      "message": "通过"
+    },
+    {
+      "name": "publish_ready_keyword",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/04_editing/gate_artifacts/第2章-待写/publish_ready.md",
+      "ok": true,
+      "message": "命中发布关键字: 可发布"
+    },
+    {
+      "name": "quality_baseline",
+      "path": "/Users/ethan/Desktop/小说/novel-creator-skill/04_editing/gate_artifacts/第2章-待写/quality_report.md",
+      "ok": false,
+      "message": "quality_report 显示未通过"
+    }
+  ],
+  "failures": [
+    "memory_update: 文件时间早于章节文件，疑似未执行最新流程",
+    "consistency_report: 文件时间早于章节文件，疑似未执行最新流程",
+    "style_calibration: 文件时间早于章节文件，疑似未执行最新流程",
+    "copyedit_report: 文件时间早于章节文件，疑似未执行最新流程",
+    "publish_ready: 文件时间早于章节文件，疑似未执行最新流程",
+    "quality_baseline: quality_report 显示未通过"
+  ],
+  "warnings": []
+}

@@ -12,8 +12,10 @@ import datetime as dt
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -32,13 +34,27 @@ SKILL_ROOT = SCRIPT_DIR.parent
 TEMPLATE_DIR = SKILL_ROOT / "templates"
 CHAPTER_RE = re.compile(r"^第\d+章.*\.md$")
 AI_PHRASE_BLACKLIST = [
-    "不禁",
-    "仿佛",
-    "映入眼帘",
-    "心中暗道",
-    "宛如",
+    # 比喻/感知套话
+    "不禁", "仿佛", "宛如", "宛若", "恍若", "仿若", "好似",
+    # 视觉过渡套话
+    "映入眼帘", "涌入眼帘", "跃入眼帘",
+    # 内心独白套话
+    "心中暗道", "心中暗想", "暗自思忖", "心中一动", "心中一凛",
+    # 对话标签套话
+    "沉声道", "淡淡地说", "缓缓说道", "淡然道",
+    # 反应/动作套话
+    "脸色一变", "神情一凛", "眉头微皱", "身形一顿", "脚步一顿",
+    # 外貌描写套话
+    "嘴角微扬", "勾起一抹弧度", "目光如炬",
+    # 过渡套话
+    "只见", "此时此刻",
+    # 主体性剥夺词
+    "不由自主", "不由得", "情不自禁",
+    # 意义膨胀
+    "叹为观止", "意义深远", "前所未有", "可谓", "毋庸置疑",
 ]
 STUB_MARKER = "<!-- NOVEL_FLOW_STUB -->"
+BEAT_SHEET_STUB_MARKER = "<!-- BEAT_SHEET_STUB -->"
 DRAFT_PLACEHOLDER_LINE = re.compile(r"(?m)^\[待写\]\s*$")
 MAX_STUB_EFFECTIVE_CHARS = 800
 FLOW_DIR_NAME = ".flow"
@@ -67,22 +83,117 @@ def run_python(script: Path, args: List[str]) -> Tuple[int, str, str, Optional[D
     return proc.returncode, out, err, payload
 
 
+def _collect_writing_constraints(
+    project_root: Path, chapter_path: Path, query: str
+) -> Dict[str, object]:
+    """写前调用三个辅助脚本，汇总约束信息供后续注入 query。"""
+    chapter_no = chapter_no_from_name(chapter_path.name)
+    constraints: Dict[str, object] = {"query": query, "chapter": chapter_no}
+    if chapter_no <= 0:
+        constraints["error"] = f"invalid_chapter_no:{chapter_path.name}"
+        return constraints
+    o_code, o_out, _o_err, o_payload = run_python(
+        SCRIPT_DIR / "outline_anchor_manager.py",
+        ["check", "--project-root", str(project_root), "--chapter", str(chapter_no)],
+    )
+    a_code, a_out, _a_err, a_payload = run_python(
+        SCRIPT_DIR / "anti_resolution_guard.py",
+        ["constraint", "--project-root", str(project_root)],
+    )
+    e_code, e_out, _e_err, e_payload = run_python(
+        SCRIPT_DIR / "event_matrix_scheduler.py",
+        ["recommend", "--project-root", str(project_root), "--chapter", str(chapter_no)],
+    )
+    constraints["outline_constraints"] = o_payload if o_payload is not None else {"stdout": o_out}
+    constraints["anti_resolution_constraints"] = a_payload if a_payload is not None else {"stdout": a_out}
+    constraints["event_recommendation"] = e_payload if e_payload is not None else {"stdout": e_out}
+    constraints["sources_ok"] = {
+        "outline_anchor_manager": o_code == 0,
+        "anti_resolution_guard": a_code == 0,
+        "event_matrix_scheduler": e_code == 0,
+    }
+    # 图谱上下文注入（已初始化图谱时生效）
+    graph_file = project_root / "00_memory" / "story_graph.json"
+    if graph_file.exists():
+        g_code, g_out, _g_err, g_payload = run_python(
+            SCRIPT_DIR / "story_graph_builder.py",
+            ["generate-context",
+             "--project-root", str(project_root),
+             "--chapter", str(max(chapter_no, 0)),
+             "--max-foreshadows", "5",
+             "--max-events", "5"],
+        )
+        if g_code == 0 and isinstance(g_payload, dict) and g_payload.get("ok"):
+            constraints["graph_context"] = g_payload
+    return constraints
+
+
+def _try_create_lock(lock_file: Path, payload: Dict[str, object]) -> bool:
+    """使用 O_CREAT|O_EXCL 原子创建锁文件，避免 TOCTOU 竞争窗口。"""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(str(lock_file), flags, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False)
+    return True
+
+
 def acquire_lock(lock_file: Path, run_id: str, timeout_sec: int) -> Tuple[bool, Optional[Dict[str, object]]]:
     now = time.time()
-    if lock_file.exists():
-        current = load_json(lock_file, {})
-        cur = cast(Dict[str, Any], current)
-        ts_raw = cur.get("ts", 0)
-        ts = float(ts_raw) if isinstance(ts_raw, (int, float, str)) else 0.0
-        if ts and (now - ts) < max(1, timeout_sec):
-            return False, current
-    save_json(lock_file, {
+    payload: Dict[str, object] = {
         "run_id": run_id,
         "pid": os.getpid(),
         "ts": now,
         "started_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    })
-    return True, None
+    }
+
+    if _try_create_lock(lock_file, payload):
+        return True, None
+
+    if not lock_file.exists():
+        return False, None
+
+    existing_stat = lock_file.stat()
+    current = load_json(lock_file, {})
+    cur = cast(Dict[str, Any], current)
+    ts_raw = cur.get("ts", 0)
+    ts = float(ts_raw) if isinstance(ts_raw, (int, float, str)) else 0.0
+    if ts and (now - ts) < max(1, timeout_sec):
+        return False, current
+
+    # 回收过期锁前再次确认文件未被其他进程替换
+    try:
+        latest_stat = lock_file.stat()
+    except FileNotFoundError:
+        if _try_create_lock(lock_file, payload):
+            return True, None
+        return False, load_json(lock_file, {})
+
+    if (
+        latest_stat.st_ino != existing_stat.st_ino
+        or latest_stat.st_mtime_ns != existing_stat.st_mtime_ns
+    ):
+        return False, load_json(lock_file, {})
+
+    lock_file.unlink(missing_ok=True)
+    if _try_create_lock(lock_file, payload):
+        return True, None
+    return False, load_json(lock_file, {})
+
+
+def validate_chapter_path(project_root: Path, chapter_file: str) -> Tuple[Path, Optional[str]]:
+    """解析并校验章节路径，确保路径在项目目录内，防止路径遍历攻击。"""
+    chapter_path = Path(chapter_file)
+    if not chapter_path.is_absolute():
+        chapter_path = project_root / chapter_path
+    chapter_path = chapter_path.resolve()
+    try:
+        chapter_path.relative_to(project_root.resolve())
+    except ValueError:
+        return chapter_path, f"安全错误：章节文件必须在项目目录内: {chapter_file}"
+    return chapter_path, None
 
 
 def release_lock(lock_file: Path, run_id: str) -> None:
@@ -376,6 +487,8 @@ def chapter_is_draft_stub(path: Path) -> bool:
     txt = read_text(path)
     if STUB_MARKER in txt:
         return True
+    if BEAT_SHEET_STUB_MARKER in txt:
+        return True
     if DRAFT_PLACEHOLDER_LINE.search(txt):
         # 仅在“占位文本很短”时才判定为草稿，避免正文引用“待写”被误判。
         effective = re.sub(r"\s+", "", txt)
@@ -392,8 +505,6 @@ def clean_for_stats(text: str) -> str:
 
 def evaluate_quality(text: str, args: argparse.Namespace) -> Dict[str, object]:
     """增强版质量评估 - 添加内容密度、AI词密度、段落多样性检查"""
-    import statistics
-
     body = clean_for_stats(text)
     pure = re.sub(r"\s+", "", body)
     char_count = len(pure)
@@ -498,73 +609,154 @@ def evaluate_quality(text: str, args: argparse.Namespace) -> Dict[str, object]:
 
 
 def generate_draft_text(project_root: Path, chapter_path: Path, query: str, min_chars: int) -> str:
-    names = load_character_names(project_root)
-    # 从角色列表获取主角名，避免硬编码
-    protagonist = names[0] if names else "主角"
-    commander = "张潮义" if "张潮义" in names else (names[1] if len(names) > 1 else "指挥官")
-    intel = "苏谨" if "苏谨" in names else (names[2] if len(names) > 2 else "情报员")
-    enemy = "赤狼" if "赤狼" in names else (names[3] if len(names) > 3 else "敌人")
-
+    # 兜底模板：LLM 不可用时使用。用 chapter_no 作随机种子，确保每章开头/结尾不同。
+    # 注意：本函数只在 --draft-provider template 或 LLM 调用失败时触发，
+    # 正常写作流程应使用 --draft-provider llm。
     chapter_no = chapter_no_from_name(chapter_path.name)
-    title = chapter_path.stem.replace("-", " ")
-    scene_by_arc = [
-        (53, 60, "河西北线", "围绕证人交易展开反制，并以斥候网和诱饵队重建主动权"),
-        (61, 70, "陇右-长安双线", "借吐蕃战压牵动朝堂，切断赵相私仓并放大皇统裂痕"),
-        (71, 80, "玄武库与关中粮道", "一边抗击吐蕃主力，一边争夺法统证据的解释权"),
-        (81, 90, "长安宫城与渭水防线", "军政并举压制政变尝试，逼出幕后同盟"),
-        (91, 100, "河西反攻至长安收束", "完成战场反攻与朝堂清算的并轨推进"),
+    title = chapter_path.stem.replace('-', ' ')
+    names = load_character_names(project_root)
+    protagonist = names[0] if names else '主角'
+    side = names[1] if len(names) > 1 else '同伴'
+
+    rng = random.Random(chapter_no)
+
+    opening_pool = [
+        (protagonist + '没有多说，直接走向了事情发生的地方。'
+         + query + '——这一步迈出去，就没有回头的余地。'
+         + '他知道自己在做什么，也知道可能付出什么代价。'
+         + '但有些事，不做会后悔，做了最多是吃亏，两害相权，他选了前者。'),
+        ('事情比预想的复杂。' + protagonist + '站在原地，把已知的信息重新梳理了一遍。'
+         + query + '——每一条线索都指向同一个方向，偏偏每一条都差一截才能闭合。'
+         + '他不急，急没用，这种事急了只会出错。'
+         + side + '在一旁说："你想好了？"他没有回答，因为还在想。'),
+        (side + '先开口说："你确定要这样做？"'
+         + protagonist + '没有立刻回答，把问题在脑子里转了一圈，才开口："不确定，但现在没有更好的选项。"'
+         + '于是两人就这样决定了：' + query + '，就从这里开始做起。'),
+        ('清晨的光线还没有彻底亮起来。' + protagonist + '已经起身，站在窗边把今天要做的事理了一遍。'
+         + query + '——放在平时，这不算什么大事，但放在现在这个节点，每一步都要踩稳。'
+         + '他动作很轻，没有惊动任何人，然后出了门。'),
+        ('上一章留下的麻烦没有消失，只是换了一张脸。' + protagonist + '盯着眼前的局面，'
+         + '想起某人说过的一句话：问题不会自己消失，它只是在等一个更坏的时机重新出现。'
+         + query + '，就是那个时机终于到了。他把手里的东西收好，准备开始。'),
     ]
-    scene = "河西战线"
-    arc_goal = "推进抗吐蕃与朝争主线"
-    for lo, hi, sc, g in scene_by_arc:
-        if lo <= chapter_no <= hi:
-            scene = sc
-            arc_goal = g
+
+    closing_pool = [
+        (protagonist + '没有立刻离开，在原地停了一会儿。'
+         + '事情走到这一步，算是告一段落——但"告一段落"不等于结束，只等于把问题暂时压住了。'
+         + '压住的东西，早晚还会冒出来。下一步怎么走，他心里已经有了一个方向，'
+         + '只是还没到说出来的时候。'),
+        (side + '问："现在怎么办？"'
+         + protagonist + '想了想，说："先把今天的事收尾，再说下一步。"'
+         + '那句话说得很轻，但两个人都听出来了——这件事还没完，甚至刚刚开始。'
+         + side + '没再多问，点了点头，两个人各自散了。'),
+        ('夜深了。' + protagonist + '把今天发生的事在脑子里过了一遍，'
+         + '有些东西对上了，有些东西还差一块。差的那块，是整件事的关键，也是目前最难拿到的那块。'
+         + '他没有急着去找，因为有些东西越找越躲，不如等它自己浮出来。明天还有时间，先休息。'),
+        ('结果不算好，也不算坏。' + protagonist + '把事情记下来，合上本子。'
+         + '他没有总结，没有下判断，只是记录。判断留到事情彻底结束再做，现在下结论，太早。'
+         + side + '看着他说："你总是这样，什么都先记下来再说。"他想了想，回答："记下来，才不会忘。"'),
+        ('回去的路上，' + protagonist + '一直没说话。' + side + '也没问。'
+         + '有些问题，现在还没有答案，说了也只是给对方添麻烦。沉默有时候比什么都有用。'
+         + '走到分叉口，两个人停下来，各自往不同的方向去了。'),
+    ]
+
+    middle_pool = [
+        (protagonist + '把情况仔细检查了一遍，确认没有遗漏，才继续往下走。'
+         + '这种习惯是多次教训换来的——不是天生谨慎，是被逼出来的。'
+         + '漏掉一个细节，后来要花十倍的力气补，不值当。'
+         + side + '在旁边等着，没有催他，因为知道他有他的节奏。'),
+        (side + '说："你有没有想过，事情可能不是我们以为的那样？"'
+         + protagonist + '停下来，认真考虑了这个问题。'
+         + '不是第一次有人这么说了，但每次被这样问，他还是会重新检查一遍自己的判断，'
+         + '看有没有什么地方出了偏差。这一次，他发现，确实有一块地方，他之前想得有点简单了。'),
+        ('中途出了一个岔子。' + protagonist + '没有慌，先把手头的东西放稳，再来处理新冒出来的问题。'
+         + '慌解决不了事情，冷静也不一定能，但至少不会把事情弄得更乱。'
+         + '他先把能控制的部分处理掉，再去看不能控制的那部分。'
+         + side + '问："要我帮忙吗？"他说："先看看再说。"'),
+        ('有一个细节一直让' + protagonist + '觉得不对，但说不清楚哪里不对。'
+         + '直到这一刻，才突然想明白——不是细节本身有问题，是细节和上下文不搭。'
+         + '单独看没问题，放进整件事里，就出现了一条缝。'
+         + '他把这个发现告诉了' + side + '，对方听完，沉默了很久才说："那我们之前判断的方向……"'
+         + protagonist + '点头："是的，需要重新想过。"'),
+        ('事情推进得比预期慢。' + protagonist + '调整了节奏，不再追着进度走，而是等一个合适的时机。'
+         + '有时候快是拖累，慢反而是推进。他见过太多人因为急着收网，把鱼全跑了。'
+         + side + '倒是沉得住气："你现在倒想开了。"他说："不是想开了，是想通了。"'),
+        (protagonist + '和' + side + '分头行动，各自去处理一件事，约好稍后碰面。'
+         + '不是因为信任，是因为两件事同时需要人，而两个人是现在手里全部的资源。'
+         + '临分开前，' + protagonist + '说："有情况随时通知我。"' + side + '点头："你也是。"'),
+        ('遇到了一个不速之客。' + protagonist + '没有表现出惊讶，只是多看了对方一眼，暗中把情况记在心里。'
+         + '对方的来意不明，但来得太巧，巧到不像是偶然。他没有先开口，等对方先说。'
+         + '对方果然先开了口，说了一句话，让他意识到，这个人知道的比他以为的要多。'),
+        ('这一段时间里，' + protagonist + '一直在思考一个问题：如果换个角度来看，事情会不会完全不同？'
+         + '答案是——会。但换角度容易，换了角度之后怎么办，才是真正的难题。'
+         + '他把这个问题说给' + side + '听，对方的回答很简单："先换，换完再说。"'
+         + '他觉得这个回答有点粗，但又不得不承认，有时候确实只能这样。'),
+        ('天色开始变暗。还有几件事没有处理完，但有些事急不来，只能等。'
+         + protagonist + '把优先级重新排了一遍，把今晚能做的和只能明天做的分开，先把今晚的做完。'
+         + '他这样做事已经很久了，不是计划感特别强，只是不愿意把事情搅成一团。'),
+        (side + '带来了一条新消息。' + protagonist + '听完，沉默了片刻，然后说："这改变了一些事情。"'
+         + '不是全部，但是重要的一部分。他把原来的计划在脑子里调整了一遍，改动不大，但方向有所偏移。'
+         + side + '问："好的方向，还是坏的方向？"他想了想，说："还不确定，走一步看一步。"'),
+        ('这件事牵扯的人比想象中多。' + protagonist + '意识到，自己需要更谨慎一些。'
+         + '不是因为怕，是因为一个错误波及的范围会更大。谨慎不等于退缩，只是换了一种走法。'
+         + '他把这个想法告诉了' + side + '，对方说："我一直觉得你太谨慎了。"他说："太谨慎也比不够谨慎好。"'),
+        ('有一个时刻，' + protagonist + '几乎要放弃。但只是那一刻，之后还是继续了。'
+         + '不是因为突然想通了什么，是因为放弃之后也没有更好的去处。既然都是难，就继续这条路。'
+         + '他没有跟任何人说这件事，包括' + side + '。有些东西，说出来反而更重。'),
+        (protagonist + '回到原地，把之前记录的东西重新看了一遍。'
+         + '信息量并不小，但真正有用的不多。这很正常——有用的信息永远比没用的少。'
+         + '他把有用的单独标出来，其他的先放着。' + side + '凑过来看了一眼，说："就这些？"他说："就这些，够了。"'),
+        ('事情发展到某个节点，开始出现分叉。' + protagonist + '需要做一个选择，而每一条路都有代价。'
+         + '他没有急着决定，先把每条路的代价都列出来，再比较哪一种代价是他能接受的。'
+         + side + '说："你考虑太多了。"他说："我宁可考虑太多，也不要考虑太少。"'),
+        (side + '说了一句他没想到的话。' + protagonist + '愣了一下，然后说："你怎么知道？"'
+         + side + '说："猜的。但猜中了吧？"'
+         + protagonist + '没有直接回答，只是说："继续说。"'
+         + '这一段对话，让整件事突然变得比之前清晰了不少。'),
+    ]
+
+    rng.shuffle(middle_pool)
+
+    opening = rng.choice(opening_pool)
+    closing = rng.choice(closing_pool)
+
+    paragraphs = [opening] + middle_pool + [closing]
+
+    text = '# ' + title + '\n\n' + '\n\n'.join(paragraphs)
+
+    # 兜底补充段落：若字数不足 target_chars，追加若干备用段落（每段各不同，不循环复用）
+    target_chars = max(min_chars, 2500)
+    extra_pool = [
+        (protagonist + '把手头的事情暂停了一下，环顾周围。'
+         + '这一带他来过几次，但每次来的原因都不一样，这一次也不例外。'
+         + '他没有急着动，先把能观察到的信息收集完，再决定下一步怎么做。'
+         + '有时候，多等一分钟，比直接冲上去强得多。'),
+        ('两人之间有一段时间没说话。'
+         + '不是因为没话说，是因为有些话说了也没用，不如省着力气。'
+         + side + '最后先开口："你打算怎么处理？"' + protagonist + '想了想，说："先把能确认的部分确认了再说，其他的等。"'),
+        (protagonist + '回头看了一眼来路，然后继续往前走。'
+         + '他清楚，这件事从一开始就没有退路，不是因为被逼的，是因为他自己选的。'
+         + '既然选了，就没有半途而废的道理。接下来的事，一件一件来。'),
+        ('到了某个节点，' + protagonist + '意识到，自己对这件事的判断，和最开始相比，已经变了不少。'
+         + '不是被说服了，是被事实改变了。这种改变让他有点不舒服，但他觉得，这是好事——'
+         + '能被事实改变，说明还没有固执到无法转圜的地步。'),
+        (side + '问了一个问题，' + protagonist + '没有立刻回答。'
+         + '那个问题触到了他一直没想清楚的地方。他不喜欢在没想清楚的时候开口，'
+         + '所以他说："给我一点时间。"' + side + '点头，没有催。'),
+    ]
+    pure_len = len(re.sub(r'\s+', '', text))
+    for extra_para in extra_pool:
+        if pure_len >= target_chars:
             break
+        text += '\n\n' + extra_para
+        pure_len = len(re.sub(r'\s+', '', text))
 
-    target_chars = max(3000, min(min_chars, 3300))
-    max_chars = 3500
-
-    paragraphs: List[str] = [
-        f"{scene}的风比前几日更硬，沙粒打在甲片上像细小鼓点。{protagonist}站在望楼北角，先看烽燧，再看粮车，再看巡哨交接的时辰。他把木牌一块块挪到沙盘上，最终停在敌军最可能突入的三条谷口。今日要办的事只有一件：{query}。若此步成，{arc_goal}便能往前撬开一寸。",
-        f"“先报军情，不报猜测。”{protagonist}对值守书记说。书记递上昨夜斥候回卷，纸上记着吐蕃骑队的折返路线，和一支不该出现的商队标识。{protagonist}把路线分成快线、慢线、伪装线三层，再让亲兵把每一层对应到不同的拦截队。现代参谋法讲究冗余验证，他在唐军营里把这套法子改成最直白的军令：同一情报，至少三处交叉再动兵。",
-        f"{commander}披着旧氅走进军帐，伤势未全好，声音却稳。“你昨晚调走前营百骑，给个说法。”{protagonist}把木尺压在沙盘西侧：“赤狼喜欢打人心，不先打城门。前营摆在明处，只会被他牵着走。我把百骑拆成五股，每股只拿半刻钟命令，见旗而动，不等口令。”{commander}盯着沙盘许久，点头：“你这是拿吐蕃的快，去撞他的乱。”",
-        f"午后，{intel}带回城中暗线。赵相的人在盐行抬高驮价，逼河西军用更慢的补给道；与此同时，长安有人放风，说{protagonist}借军情挟持证人，意在自立。两条线一内一外，配得极紧。{protagonist}没有急着辩白，而是先把物证分柜封存：账册页、口供条、押印蜡。政治斗争最怕口舌先行，他要把每一次反击都钉在可复核的证据上。",
-        f"黄昏时分，{enemy}果然送来使者。使者只带一句话：交出押解名单的原件，换回半名证人和半份真相。{protagonist}当场回绝：“我要人活着，要账链完整，要你们在城南驿站留下真实路线。少一条，这笔买卖不做。”使者冷笑：“你拿什么谈？”{protagonist}把一封伪造调令丢在案上：“拿你们昨夜提前布伏的证据谈。”",
-        f"夜战在二更后突起。吐蕃轻骑从北坡探入，明打粮垛，暗切水源。{protagonist}提前在水车沟设了折线拒马，又让弓手按‘三段火’轮替：第一段压头马，第二段断后队，第三段专打传令骑。短短半个时辰，敌军三次冲锋都被截断。最要紧的是，唐军没有追到黑谷深处，而是在界线前收兵。现代军事训练里最难的是克制，他把“见好就收”写进了军中功簿。",
-        f"战后清点，损失比预计少三成。{commander}当众升了两名校尉，却把最大的军功记在“执行纪律”四字上。{protagonist}借势推行新操典：白日练队形转向，夜间练口令拆分，三日一轮沙盘复盘。老卒一开始不服，觉得花架子太多；等到下一次伏击，所有人都看懂了门道——新操典让每个百人队都能在失去主将时继续打。",
-        f"军营之外，长安朝堂也在起风。太子党与赵相党围绕边军调度互相攻讦，言辞越狠，越说明各家都怕河西突然站稳。{intel}把密报摊开：“有人在问你身世，问得很细，连你幼年住过哪条巷都在查。”{protagonist}沉默片刻，只说一句：“他们要的不是我是谁，是谁能借我开刀。”他决定反其道而行，把部分可公开线索主动递进京中，让谣言失去先手。",
-        f"次日黎明，{protagonist}亲自带队走访伤兵营。他不谈宏图，只问三件事：箭伤处置是否及时、口粮是否按数、家书是否能寄。他清楚军心不是口号，是每天都能摸到的秩序。伤兵中有人低声问：“都说朝里要弃河西，咱还守得住吗？”{protagonist}答得很慢：“守得住。因为我们先守住彼此，再守城。”短短一句，帐内沉默后响起应声。",
-        f"傍晚，{enemy}第二次来信，语气比前夜急。信上多了一个新条件：要{protagonist}独自赴约，地点定在废烽台下。{commander}反对独行，{intel}建议设双层替身。{protagonist}最终取中策：本人出面，但所有谈判节点由暗号触发，超过三句废话即终止接触。他把暗号写成最简单的军中术语，确保任何一个小队都能在混战里听懂并执行。",
-        f"废烽台会面时，风里带着血腥味。{enemy}没有现身，只隔着石墙问：“你真要把长安那层天掀开？”{protagonist}回道：“不是掀天，是把压在边军头上的假天拆掉。”对方沉默良久，丢来一枚半裂玉环和一段口供抄本。抄本只写了名字首字，却足以把私仓与中枢某署衙连在一起。{protagonist}把玉环收进袖中，心里已把后续三步排好：先核笔迹，再核押印，再核传递时序。",
-        f"回营路上，{intel}问：“若这份口供是真的，你要先打吐蕃，还是先打朝堂？”{protagonist}望着城头火把，回答干脆：“先打能今天就死人那一线，再打能明天毁国那一线。战场不能停，证据也不能断。”这是他一路成长后的取舍：不再迷信单点胜负，而是把战争与政治当作同一张作战图上的两条轴。",
-        f"本章收束时，{protagonist}在军议簿末页添下一行：‘第{chapter_no}章后，执行双轨推进——北线压敌骑，南线锁账链。’他抬头看见城楼信灯连闪三次，来自长安的急件已经在路上。谁先拆开那封急件，谁就能决定下一轮攻防的节奏。",
-    ]
-
-    filler_pool = [
-        f"军议结束后，{protagonist}把当日命令逐条复述给各营校尉，每条命令都附‘失败兜底’。这套做法起初让人觉得啰嗦，但几次突发后，人人都知道它能保命。",
-        f"{commander}要求全军三日内完成一次夜行十里和一次无火造饭，{protagonist}把考核表按班伍贴到营门，谁拖后腿谁当众复盘，不罚面子，只罚流程。",
-        f"{intel}补充了一条新消息：长安有人要在朝会上拿河西伤亡做文章。{protagonist}让文书先写事实账，再写处置账，最后写改进账，三账并列，堵住空口攻讦。",
-        f"押运队在关口遇查，{protagonist}让副将故意暴露一份假名册，引敌方把注意力引到错误方向，真正证物则随军医车慢行南下。",
-        f"当夜点名时，{protagonist}要求每名队正讲一条‘今日差错’，不许只报功。军中气氛因此更硬，却也更实。",
-        f"在沙盘复盘里，{protagonist}把吐蕃惯用的佯退路线标成红线，把唐军容易上头的追击路线标成黑线，反复强调‘黑线之外，功再大也不追’。",
-    ]
-
-    text = f"# {title}\n\n" + "\n\n".join(paragraphs)
-    i = 0
-    while len(re.sub(r"\s+", "", text)) < target_chars:
-        text += "\n\n" + filler_pool[i % len(filler_pool)]
-        i += 1
-
-    pure_len = len(re.sub(r"\s+", "", text))
-    if pure_len > max_chars:
-        keep = int(len(text) * (max_chars / pure_len))
+    if pure_len > target_chars + 500:
+        keep = int(len(text) * ((target_chars + 500) / pure_len))
         clipped = text[:keep]
-        cut = max(clipped.rfind("。"), clipped.rfind("！"), clipped.rfind("？"))
+        cut = max(clipped.rfind('。'), clipped.rfind('！'), clipped.rfind('？'))
         if cut > 0:
-            text = clipped[: cut + 1]
-        else:
-            text = clipped
+            text = clipped[:cut + 1]
 
     return text
 
@@ -575,6 +767,104 @@ def improve_text_minimally(text: str, query: str) -> str:
         "确保本章既有情节推进也有角色关系变化。"
     )
     return text.rstrip() + "\n\n" + extra + "\n"
+
+
+def _generate_beat_draft(
+    project_root: Path,
+    chapter_path: Path,
+    chapter_no: int,
+    query: str,
+    writing_constraints: Optional[Dict[str, object]],
+    args: argparse.Namespace,
+) -> Tuple[bool, str]:
+    """Beat Sheet 流水线：generate → expand → synthesize。
+
+    返回 (success: bool, mode: str)。
+    成功时 chapter_path 已被写入合成草稿。
+    失败时返回 (False, error_reason)，调用方应回退到普通 draft 模式。
+    """
+    chapter_goal = query[:200]  # 截断保证参数合法
+
+    # Step 1: 生成 Beat Sheet 骨架
+    b_code, _b_out, _b_err, b_payload = run_python(
+        SCRIPT_DIR / "beat_sheet_generator.py",
+        ["generate",
+         "--project-root", str(project_root),
+         "--chapter", str(chapter_no),
+         "--chapter-goal", chapter_goal,
+         "--beat-count", str(getattr(args, "beat_count", 4))],
+    )
+    if b_code != 0 or not isinstance(b_payload, dict) or not b_payload.get("ok"):
+        return False, "beat_generate_failed"
+
+    beat_count = int(b_payload.get("beat_count", 4))
+
+    # Step 2: 逐 Beat 扩写（LLM 模式或模板模式）
+    beats_dir = project_root / "00_memory" / "beats"
+    beats_dir.mkdir(parents=True, exist_ok=True)
+    draft_provider = getattr(args, "draft_provider", "template")
+
+    for beat_id in range(1, beat_count + 1):
+        e_code, _e_out, _e_err, e_payload = run_python(
+            SCRIPT_DIR / "beat_sheet_generator.py",
+            ["expand",
+             "--project-root", str(project_root),
+             "--chapter", str(chapter_no),
+             "--beat-id", str(beat_id)],
+        )
+        if e_code != 0 or not isinstance(e_payload, dict):
+            continue
+
+        expand_prompt = e_payload.get("expand_prompt", "")
+        beat_file = beats_dir / f"ch{chapter_no:04d}_beat{beat_id:02d}_expand.md"
+
+        if draft_provider == "llm" and expand_prompt:
+            try:
+                from novel_chapter_writer import write_chapter  # type: ignore[import]
+                overrides: Dict[str, object] = {"writing_prompt": expand_prompt}
+                if getattr(args, "llm_provider", None):
+                    overrides["ai_provider"] = args.llm_provider
+                if getattr(args, "llm_model", None):
+                    overrides["model"] = args.llm_model
+                if getattr(args, "llm_api_key", None):
+                    overrides["api_key"] = args.llm_api_key
+                llm_result = write_chapter(
+                    project_root,
+                    chapter_file=beat_file,
+                    config_overrides=overrides,
+                    dry_run=False,
+                )
+                if not llm_result.get("ok"):
+                    write_text(beat_file, expand_prompt)
+            except Exception:
+                write_text(beat_file, expand_prompt)
+        else:
+            write_text(beat_file, expand_prompt)
+
+    # Step 3: chapter_synthesizer 合成
+    s_code, _s_out, _s_err, s_payload = run_python(
+        SCRIPT_DIR / "chapter_synthesizer.py",
+        ["synthesize",
+         "--project-root", str(project_root),
+         "--chapter", str(chapter_no)],
+    )
+    if s_code != 0 or not isinstance(s_payload, dict) or not s_payload.get("ok"):
+        return False, "synthesize_failed"
+
+    output_file = s_payload.get("output_file", "")
+    mode = s_payload.get("mode", "unknown")
+
+    if mode == "draft_merged" and output_file and Path(output_file).exists():
+        synth_text = read_text(Path(output_file))
+        write_text(chapter_path, synth_text)
+        return True, "beat_sheet_llm"
+    elif mode == "prompt_only" and output_file and Path(output_file).exists():
+        synth_prompt = read_text(Path(output_file))
+        stub = f"# {chapter_path.stem}\n\n{BEAT_SHEET_STUB_MARKER}\n\n{synth_prompt}\n"
+        write_text(chapter_path, stub)
+        return True, "beat_sheet_template"
+
+    return False, "synthesize_no_output"
 
 
 def apply_targeted_quality_fix(
@@ -718,11 +1008,77 @@ def write_gate_artifacts(
 - AI词命中：{quality['ai_phrase_hits'] if quality['ai_phrase_hits'] else '未命中'}
 - 结论：本章风格基本稳定，建议继续保持短句与动作描写平衡。
 """
+    # 调用 text_humanizer 获取 AI 痕迹检测数据，severity >= medium 时自动纠正（最多2轮）
+    _SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2}
+    humanizer_section = ""
+    humanizer_rounds = 0
+    humanizer_auto_fixed = False
+    h_code, _h_out, _h_err, h_payload = run_python(
+        SCRIPT_DIR / "text_humanizer.py",
+        ["report", "--chapter-file", str(chapter_path)],
+    )
+    if h_code == 0 and isinstance(h_payload, dict) and h_payload.get("ok"):
+        llm_provider = os.environ.get("NOVEL_LLM_PROVIDER", "")
+        while (
+            _SEVERITY_ORDER.get(h_payload.get("severity", "low"), 0) >= 1
+            and humanizer_rounds < 2
+        ):
+            p_code, _p_out, _p_err, p_payload = run_python(
+                SCRIPT_DIR / "text_humanizer.py",
+                ["prompt", "--chapter-file", str(chapter_path)],
+            )
+            if p_code != 0 or not isinstance(p_payload, dict):
+                break
+            humanize_prompt = p_payload.get("prompt", "")
+            if not humanize_prompt:
+                break
+            if llm_provider:
+                try:
+                    from novel_chapter_writer import write_chapter  # type: ignore[import]
+                    llm_result = write_chapter(
+                        project_root,
+                        chapter_file=chapter_path,
+                        config_overrides={
+                            "ai_provider": llm_provider,
+                            "writing_prompt": humanize_prompt,
+                        },
+                        dry_run=False,
+                    )
+                    if llm_result.get("ok"):
+                        humanizer_auto_fixed = True
+                except Exception:
+                    pass
+            humanizer_rounds += 1
+            # 重新检测，severity 已达 low 则退出循环
+            re_code, _, _, re_payload = run_python(
+                SCRIPT_DIR / "text_humanizer.py",
+                ["report", "--chapter-file", str(chapter_path)],
+            )
+            if (re_code == 0 and isinstance(re_payload, dict)
+                    and _SEVERITY_ORDER.get(re_payload.get("severity", "low"), 0) < 1):
+                h_payload = re_payload
+                break
+            if not llm_provider:
+                break  # 非 LLM 模式只生成一次 prompt，不继续循环
+        severity_map = {"low": "轻微", "medium": "中等", "high": "严重"}
+        sev = severity_map.get(h_payload.get("severity", ""), h_payload.get("severity", ""))
+        report_md = h_payload.get("report", "")
+        humanizer_section = f"\n\n---\n\n{report_md}"
+        if humanizer_auto_fixed:
+            humanizer_section += f"\n\n（自动纠正已执行 {humanizer_rounds} 轮）"
+        elif humanizer_rounds > 0:
+            humanizer_section += "\n\n（已生成润色 prompt，需人工执行 /校稿 完成纠正）"
+    else:
+        sev = "未知"
+        humanizer_section = "\n\n（text_humanizer 检测跳过：脚本不可用或无法读取文件）"
+
     copyedit = f"""# 校稿报告
 
 - 修订目标：降低AI味、提升可读性、保证节奏递进
 - 动作：清理重复表述、补足转场、强化章末钩子
-- 发布建议：可进入发布判定
+- AI痕迹严重程度：{sev}
+- 发布建议：参考下方检测报告后执行两遍式润色
+{humanizer_section}
 """
     publish = f"""# 发布判定
 
@@ -919,26 +1275,9 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
         q_code, q_out, q_err, q_payload = run_python(SCRIPT_DIR / "plot_rag_retriever.py", query_cmd)
 
         if args.chapter_file:
-            chapter_path = Path(args.chapter_file)
-            if not chapter_path.is_absolute():
-                chapter_path = project_root / chapter_path
-            chapter_path = chapter_path.resolve()
-            # 安全检查：确保路径在项目目录内，防止路径遍历攻击
-            try:
-                chapter_path.relative_to(project_root.resolve())
-            except ValueError:
-                return {
-                    "ok": False,
-                    "error": f"安全错误：章节文件必须在项目目录内: {args.chapter_file}",
-                }
-            # 安全检查：确保路径在项目目录内，防止路径遍历攻击
-            try:
-                chapter_path.relative_to(project_root.resolve())
-            except ValueError:
-                return {
-                    "ok": False,
-                    "error": f"安全错误：章节文件必须在项目目录内: {args.chapter_file}",
-                }
+            chapter_path, path_error = validate_chapter_path(project_root, args.chapter_file)
+            if path_error:
+                return {"ok": False, "error": path_error}
         else:
             chapter_path = (manuscript_dir / next_chapter_filename(manuscript_dir, title=args.chapter_title)).resolve()
         original_chapter_path = chapter_path
@@ -992,10 +1331,83 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             except ImportError:
                 pass  # research_agent.py 不存在时静默跳过
 
+        # 写前约束注入：大纲配额 / 反向刹车 / 事件推荐 / 知识图谱上下文
+        writing_constraints: Optional[Dict[str, object]] = None
+        injected_lines: List[str] = []
+        if args.enable_constraints and chapter_path:
+            writing_constraints = _collect_writing_constraints(project_root, chapter_path, query)
+            outline_c = writing_constraints.get("outline_constraints")
+            if isinstance(outline_c, dict):
+                outline_prompt = outline_c.get("constraints_prompt")
+                if isinstance(outline_prompt, str) and outline_prompt.strip():
+                    injected_lines.append(outline_prompt.strip())
+            anti_c = writing_constraints.get("anti_resolution_constraints")
+            if isinstance(anti_c, dict):
+                anti_prompt = anti_c.get("constraint_prompt")
+                if isinstance(anti_prompt, str) and anti_prompt.strip():
+                    injected_lines.append(anti_prompt.strip())
+            event_rec = writing_constraints.get("event_recommendation")
+            if isinstance(event_rec, dict):
+                rec_types = event_rec.get("recommended_types")
+                if isinstance(rec_types, list) and rec_types:
+                    injected_lines.append(
+                        "本章建议优先事件类型：" + "、".join(str(x) for x in rec_types if str(x).strip())
+                    )
+                notes = event_rec.get("notes")
+                if isinstance(notes, list):
+                    note_lines = [str(n).strip() for n in notes if str(n).strip()]
+                    injected_lines.extend(note_lines)
+            graph_ctx = writing_constraints.get("graph_context")
+            if isinstance(graph_ctx, dict):
+                ctx_prompt = graph_ctx.get("context_prompt", "")
+                if ctx_prompt.strip():
+                    injected_lines.append(ctx_prompt.strip())
+
+        # RAG 检索结果注入：将 top-k 历史片段作为写作参考（与约束独立，始终注入）
+        rag_lines: List[str] = []
+        if isinstance(q_payload, dict):
+            _rag_result = q_payload.get("result")
+            _retrieved = _rag_result.get("retrieved", []) if isinstance(_rag_result, dict) else []
+            _rag_limit = getattr(args, "top_k", 4)
+            for _item in _retrieved:
+                if not isinstance(_item, dict):
+                    continue
+                _chapter_ref = str(_item.get("chapter_file") or "").strip()
+                for _passage in (_item.get("passages") or []):
+                    if not isinstance(_passage, dict):
+                        continue
+                    _text = str(_passage.get("text") or "").strip()
+                    if _text:
+                        rag_lines.append(f"{_chapter_ref}：{_text}" if _chapter_ref else _text)
+                        if len(rag_lines) >= _rag_limit:
+                            break
+                if len(rag_lines) >= _rag_limit:
+                    break
+
+        # 拼装最终写作查询：原始意图 + 相关历史剧情 + 写作约束
+        query_sections = [query]
+        if rag_lines:
+            query_sections.append("[相关历史剧情]\n" + "\n".join(f"- {line}" for line in rag_lines))
+        if injected_lines:
+            query_sections.append("[写作约束]\n" + "\n".join(f"- {line}" for line in injected_lines))
+        writing_query = "\n\n".join(query_sections)
+
         auto_draft_applied = False
         draft_provider_used = getattr(args, 'draft_provider', 'template')
         fallback_applied = False
         llm_error_msg = None
+
+        # Beat Sheet 流水线（优先于普通 draft，默认开启）
+        if getattr(args, "use_beat_sheet", True) and chapter_is_draft_stub(chapter_path):
+            _beat_chapter_no = chapter_no_from_name(chapter_path.name)
+            if _beat_chapter_no > 0:
+                beat_applied, beat_mode = _generate_beat_draft(
+                    project_root, chapter_path, _beat_chapter_no,
+                    writing_query, writing_constraints, args,
+                )
+                if beat_applied:
+                    auto_draft_applied = True
+                    draft_provider_used = beat_mode
 
         if chapter_is_draft_stub(chapter_path) and args.auto_draft:
             if draft_provider_used == "llm":
@@ -1068,7 +1480,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
         if not draft_mode and args.auto_improve:
             while (not quality_after["passed"]) and improve_rounds < args.auto_improve_rounds:
                 txt = read_text(chapter_path)
-                write_text(chapter_path, improve_text_minimally(txt, query))
+                write_text(chapter_path, improve_text_minimally(txt, writing_query))
                 quality_after = evaluate_quality(read_text(chapter_path), args)
                 improve_rounds += 1
 
@@ -1080,7 +1492,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
         gate_passed_final = False
 
         if not draft_mode:
-            write_gate_artifacts(project_root, chapter_path, query, quality_after, q_payload)
+            write_gate_artifacts(project_root, chapter_path, writing_query, quality_after, q_payload)
             _, gate_payload = run_gate_check(project_root, chapter_path)
             gate_passed_final = bool(gate_payload.get("passed")) if isinstance(gate_payload, dict) else False
 
@@ -1089,7 +1501,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                 chapter_path, actions, quality_after = auto_fix_after_gate_failure(
                     project_root,
                     chapter_path,
-                    query,
+                    writing_query,
                     quality_after,
                     q_payload,
                     gate_payload if gate_payload else {},
@@ -1109,6 +1521,87 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             SCRIPT_DIR / "plot_rag_retriever.py",
             ["build", "--project-root", str(project_root)],
         )
+
+        # 写后处理：图谱更新 + 批量审核（均为可选，默认关闭）
+        graph_update_file: Optional[str] = None
+        batch_review_task: Optional[str] = None
+        style_update_file: Optional[str] = None
+        if gate_passed_final and chapter_path:
+            _chapter_no = chapter_no_from_name(chapter_path.name)
+            if args.auto_graph_update and _chapter_no > 0:
+                _, _g_out, _g_err, _g_payload = run_python(
+                    SCRIPT_DIR / "story_graph_updater.py",
+                    ["extract", "--project-root", str(project_root),
+                     "--chapter", str(_chapter_no), "--chapter-file", str(chapter_path)],
+                )
+                if isinstance(_g_payload, dict):
+                    graph_update_file = _g_payload.get("update_file")
+                # apply：将 extract 生成的待执行更新写入知识图谱
+                if isinstance(_g_payload, dict) and _g_payload.get("ok"):
+                    run_python(
+                        SCRIPT_DIR / "story_graph_updater.py",
+                        ["apply",
+                         "--project-root", str(project_root),
+                         "--chapter", str(_chapter_no)],
+                    )
+            if args.auto_batch_review:
+                _chapter_numbers = sorted({
+                    chapter_no_from_name(p.name)
+                    for p in manuscript_dir.glob("*.md")
+                    if p.is_file() and chapter_no_from_name(p.name) > 0
+                })
+                _chapter_count = len(_chapter_numbers)
+                if _chapter_count > 0 and _chapter_count % 10 == 0:
+                    _batch_start = _chapter_count - 9
+                    _batch_end = _chapter_count
+                    _, _r_out, _r_err, _r_payload = run_python(
+                        SCRIPT_DIR / "cross_agent_reviewer.py",
+                        ["batch-review", "--project-root", str(project_root),
+                         "--chapter-start", str(_batch_start), "--chapter-end", str(_batch_end)],
+                    )
+                    if isinstance(_r_payload, dict):
+                        batch_review_task = _r_payload.get("task_file")
+            # 大纲锚点推进：门禁通过后将锚点推进到下一章
+            if args.enable_constraints and _chapter_no > 0:
+                run_python(
+                    SCRIPT_DIR / "outline_anchor_manager.py",
+                    ["advance",
+                     "--project-root", str(project_root),
+                     "--to-chapter", str(_chapter_no + 1)],
+                )
+            # 风格基准自动更新：每 N 章（默认10章）更新一次
+            style_update_file: Optional[str] = None
+            if getattr(args, "auto_style_update", True):
+                _style_interval = getattr(args, "style_update_interval", 10)
+                _all_chapters = sorted({
+                    chapter_no_from_name(p.name)
+                    for p in manuscript_dir.glob("*.md")
+                    if p.is_file() and chapter_no_from_name(p.name) > 0
+                })
+                _chapter_count = len(_all_chapters)
+                if _chapter_count > 0 and _chapter_count % _style_interval == 0:
+                    recent_chapters = sorted(
+                        [p for p in manuscript_dir.glob("*.md") if p.is_file()],
+                        key=lambda p: chapter_no_from_name(p.name),
+                        reverse=True,
+                    )[:_style_interval]
+                    if recent_chapters:
+                        style_args = (
+                            [str(p) for p in recent_chapters]
+                            + ["--profile-name", f"auto_ch{_chapter_count}",
+                               "--project-root", str(project_root)]
+                        )
+                        st_code, _st_out, _st_err, st_payload = run_python(
+                            SCRIPT_DIR / "style_fingerprint.py", style_args
+                        )
+                        if st_code == 0 and isinstance(st_payload, dict):
+                            _st_outputs = st_payload.get("outputs", {})
+                            if isinstance(_st_outputs, dict):
+                                style_update_file = (
+                                    _st_outputs.get("project_profile")
+                                    or _st_outputs.get("global_profile")
+                                    or ""
+                                )
 
         ok = (q_code == 0 and b_code == 0 and (draft_mode or gate_passed_final))
 
@@ -1159,6 +1652,10 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
             "chapter_hash_before": chapter_hash_before,
             "chapter_hash_after": file_sha1(chapter_path) if chapter_path and chapter_path.exists() else "",
             "research_gaps": research_gaps,
+            "writing_constraints": writing_constraints,
+            "graph_update_file": graph_update_file,
+            "batch_review_task": batch_review_task,
+            "style_update_file": style_update_file if gate_passed_final and chapter_path else None,
         }
 
         if draft_mode and not args.auto_draft:
@@ -1240,6 +1737,43 @@ def one_click(args: argparse.Namespace) -> Dict[str, object]:
         SCRIPT_DIR / "plot_rag_retriever.py",
         ["build", "--project-root", str(project_root)],
     )
+
+    # 初始化知识图谱：调用 init 子命令确保结构符合 story_graph_builder 标准
+    story_graph_file = project_root / "00_memory" / "story_graph.json"
+    if not story_graph_file.exists():
+        run_python(SCRIPT_DIR / "story_graph_builder.py", ["init", "--project-root", str(project_root)])
+        if story_graph_file.exists():
+            files["changed"].append(str(story_graph_file))
+
+    # 初始化大纲锚点：调用 init 子命令，自动解析 novel_plan.md 构建 volumes
+    outline_anchors_file = project_root / "00_memory" / "outline_anchors.json"
+    if not outline_anchors_file.exists():
+        target_chapters = max(10, int(getattr(args, "target_words", 0) or 0) // 3500)
+        run_python(
+            SCRIPT_DIR / "outline_anchor_manager.py",
+            ["init", "--project-root", str(project_root),
+             "--total-chapters-target", str(target_chapters)],
+        )
+        if outline_anchors_file.exists():
+            files["changed"].append(str(outline_anchors_file))
+
+    # 将开书前五要素确认信息写入 idea_seed.md（目标读者/写作风格/核心禁区）
+    confirmation_items = [
+        ("目标读者", getattr(args, "target_audience", "")),
+        ("写作风格", getattr(args, "writing_style", "")),
+        ("核心禁区", getattr(args, "core_taboo", "")),
+    ]
+    confirmation_lines = [
+        f"- {label}：{val}" for label, val in confirmation_items if str(val or "").strip()
+    ]
+    if confirmation_lines:
+        idea_seed_file = project_root / "00_memory" / "idea_seed.md"
+        original = read_text(idea_seed_file) if idea_seed_file.exists() else "# 创意种子\n"
+        addition = "\n\n## 开书前确认\n" + "\n".join(confirmation_lines) + "\n"
+        write_text(idea_seed_file, original.rstrip() + addition)
+        if str(idea_seed_file) not in files["changed"]:
+            files["changed"].append(str(idea_seed_file))
+
     return {
         "ok": b_code == 0,
         "command": "one-click",
@@ -1248,6 +1782,254 @@ def one_click(args: argparse.Namespace) -> Dict[str, object]:
         "skipped_files": files["skipped"],
         "index_result": b_payload if b_payload is not None else {"stdout": b_out, "stderr": b_err},
         "next_step": "/继续写",
+    }
+
+
+def cmd_revise_outline(args: argparse.Namespace) -> Dict[str, object]:
+    """执行 /改纲续写：锚点重算 + 图谱级联标记 + RAG 索引重建。
+
+    使用前提：用户已手动编辑 novel_plan.md，本命令将所有下游状态与新大纲同步。
+    三步骤依次执行：
+      1. 备份旧锚点 + 重算大纲锚点（必须成功，否则 ok=False）
+      2. 图谱级联分析（图谱存在时执行，失败不阻断后续）
+      3. 重建 RAG 索引（始终执行，失败不阻断报告生成）
+    """
+    project_root = Path(args.project_root).expanduser().resolve()
+    from_chapter = int(args.from_chapter)
+    change_description = str(getattr(args, "change_description", "") or "").strip()
+
+    if from_chapter <= 0:
+        return {
+            "ok": False,
+            "command": "revise-outline",
+            "error": "from_chapter_must_be_positive",
+        }
+
+    plan_file = project_root / "00_memory" / "novel_plan.md"
+    if not plan_file.exists():
+        return {
+            "ok": False,
+            "command": "revise-outline",
+            "error": f"novel_plan_missing:{plan_file}",
+        }
+
+    flow_dir = project_root / FLOW_DIR_NAME
+    ensure_dir(flow_dir)
+
+    report_file = project_root / "00_memory" / "revise_outline_report.md"
+    anchors_file = project_root / "00_memory" / "outline_anchors.json"
+    backup_file: Optional[Path] = None
+    backup_created = False
+
+    try:
+        # Step 1: 备份现有锚点（不存在则跳过）
+        if anchors_file.exists():
+            ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_file = flow_dir / f"backup_anchors_{ts}.json"
+            shutil.copy2(str(anchors_file), str(backup_file))
+            backup_created = True
+
+        # Step 2: 重算大纲锚点（从 novel_plan.md 重新解析卷结构）
+        r_code, r_out, _r_err, r_payload = run_python(
+            SCRIPT_DIR / "outline_anchor_manager.py",
+            ["recalculate", "--project-root", str(project_root)],
+        )
+        recalc_result: Dict[str, object] = (
+            r_payload if isinstance(r_payload, dict) else {"stdout": r_out}
+        )
+        anchors_recalculated = r_code == 0 and bool(recalc_result.get("ok"))
+
+        # Step 3: 图谱级联标记（锚点成功且图谱存在时执行，失败不阻断后续）
+        cascade_result: Dict[str, object] = {"ok": False, "skipped": True}
+        cascade_ok = False
+        graph_file = project_root / "00_memory" / "story_graph.json"
+        if anchors_recalculated and graph_file.exists():
+            c_code, c_out, _c_err, c_payload = run_python(
+                SCRIPT_DIR / "story_graph_updater.py",
+                [
+                    "cascade",
+                    "--project-root", str(project_root),
+                    "--from-chapter", str(from_chapter),
+                    "--change-description", change_description,
+                ],
+            )
+            cascade_result = (
+                c_payload if isinstance(c_payload, dict) else {"stdout": c_out}
+            )
+            cascade_ok = c_code == 0 and bool(cascade_result.get("ok"))
+
+        # Step 4: 重建 RAG 索引（锚点成功后执行，不依赖级联结果）
+        rag_result: Dict[str, object] = {"ok": False, "skipped": True}
+        rag_rebuilt = False
+        if anchors_recalculated:
+            b_code, b_out, _b_err, b_payload = run_python(
+                SCRIPT_DIR / "plot_rag_retriever.py",
+                ["build", "--project-root", str(project_root)],
+            )
+            rag_result = b_payload if isinstance(b_payload, dict) else {"stdout": b_out}
+            rag_rebuilt = b_code == 0 and bool(rag_result.get("ok"))
+
+        # Step 5: 写入改纲汇总报告
+        report_lines = [
+            "# 改纲续写报告",
+            "",
+            f"- 时间：{dt.datetime.now().isoformat()}",
+            f"- 改纲生效章节：第{from_chapter}章",
+            f"- 改纲说明：{change_description or '未提供'}",
+            f"- novel_plan.md：{plan_file}",
+            f"- 锚点备份：{backup_file if backup_created else '无旧锚点，无需备份'}",
+            "",
+            "## 锚点重算",
+            f"- 成功：{anchors_recalculated}",
+            f"- 卷数：{recalc_result.get('volume_count', 'N/A')}",
+            f"- 总章数：{recalc_result.get('total_chapters_target', 'N/A')}",
+            "  （如卷数/总章数与新大纲不符，请检查 novel_plan.md 卷标题格式）",
+            "",
+            "## 图谱级联",
+            f"- 执行：{'是' if graph_file.exists() else '否（图谱文件不存在，跳过）'}",
+            f"- 成功：{cascade_ok}",
+            f"- 受影响节点：{cascade_result.get('affected_nodes_count', 'N/A')}",
+            f"- 受影响边：{cascade_result.get('affected_edges_count', 'N/A')}",
+            "",
+            "## RAG 索引重建",
+            f"- 成功：{rag_rebuilt}",
+            "",
+            "## 下一步",
+            "- 请核对上方卷数/总章数是否与新大纲一致。",
+            "- 如不一致，请修正 novel_plan.md 后再次执行 /改纲续写。",
+            "- 确认无误后，执行 /继续写 从新剧情方向推进。",
+            "",
+        ]
+        report_written = write_text(report_file, "\n".join(report_lines))
+
+        # ok 的判定：锚点重算和报告写入是必要条件；级联和RAG失败可降级继续
+        ok = anchors_recalculated and report_written
+        error: Optional[str] = (
+            None if ok
+            else "anchor_recalculate_failed" if not anchors_recalculated
+            else "report_write_failed"
+        )
+        next_step = (
+            "改纲完成：锚点已重算、图谱已标记、索引已重建。请执行 /继续写 从新方向推进。"
+            if (anchors_recalculated and cascade_ok and rag_rebuilt)
+            else "改纲流程部分完成，请查看 revise_outline_report.md 确认失败步骤后再执行 /继续写。"
+        )
+
+        return {
+            "ok": ok,
+            "command": "revise-outline",
+            "project_root": str(project_root),
+            "from_chapter": from_chapter,
+            "change_description": change_description,
+            "anchors_backup_file": str(backup_file) if backup_file else None,
+            "anchors_recalculated": anchors_recalculated,
+            "anchors_result": recalc_result,
+            "cascade_ok": cascade_ok,
+            "cascade_result": cascade_result,
+            "rag_rebuilt": rag_rebuilt,
+            "rag_result": rag_result,
+            "report_file": str(report_file),
+            "next_step": next_step,
+            "error": error,
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "command": "revise-outline",
+            "project_root": str(project_root),
+            "error": repr(exc),
+        }
+
+
+def cmd_brainstorm(args: argparse.Namespace) -> Dict[str, object]:
+    """执行 /脑洞建图：交互式脑洞引导 → 生成 idea_seed.md + plan_generation_prompt.md。"""
+    project_root = Path(args.project_root).expanduser().resolve()
+    project_structure(project_root)
+
+    # Step 1: 初始化会话（已有会话则保留）
+    init_cmd = ["init", "--project-root", str(project_root)]
+    if args.genre:
+        init_cmd.extend(["--genre", args.genre])
+    if args.idea:
+        init_cmd.extend(["--title-hint", args.idea])
+    i_code, i_out, _i_err, i_payload = run_python(
+        SCRIPT_DIR / "interactive_ideation_engine.py", init_cmd,
+    )
+    if i_code != 0:
+        return {
+            "ok": False, "command": "brainstorm", "project_root": str(project_root),
+            "error": "ideation_init_failed",
+            "init_result": i_payload if i_payload is not None else {"stdout": i_out},
+        }
+
+    # Step 2: 如果提供了 genre/idea，预填第1轮答案（使用 fallback 模式）
+    c_payload: Optional[Dict[str, object]] = None
+    if args.genre or args.idea:
+        seed_answers: Dict[str, str] = {}
+        if args.genre:
+            seed_answers["genre"] = args.genre
+        if args.idea:
+            seed_answers["hook"] = args.idea
+            seed_answers["protagonist_goal"] = args.idea
+        c_code, _c_out, _c_err, c_payload = run_python(
+            SCRIPT_DIR / "interactive_ideation_engine.py",
+            [
+                "collect", "--project-root", str(project_root),
+                "--round", "1",
+                "--answers", json.dumps(seed_answers, ensure_ascii=False),
+                "--use-fallback",
+            ],
+        )
+        # 推进到下一轮，让 generate 可以生成产出物
+        if c_code == 0:
+            run_python(
+                SCRIPT_DIR / "interactive_ideation_engine.py",
+                ["advance", "--project-root", str(project_root)],
+            )
+
+    # Step 3: 尝试生成 idea_seed.md（需要至少1轮答案；无答案时优雅降级返回引导问题）
+    g_code, _g_out, _g_err, g_payload = run_python(
+        SCRIPT_DIR / "interactive_ideation_engine.py",
+        ["generate", "--project-root", str(project_root)],
+    )
+
+    # generate 因答案不足失败时：返回 ok=True 并附带引导问题，让用户继续填写
+    generate_succeeded = g_code == 0 and isinstance(g_payload, dict) and g_payload.get("ok")
+    if not generate_succeeded:
+        prompts_for_user = (
+            i_payload.get("prompts", []) if isinstance(i_payload, dict) else []
+        )
+        fallback_opts = (
+            i_payload.get("fallback_options", {}) if isinstance(i_payload, dict) else {}
+        )
+        return {
+            "ok": True,  # 会话已初始化，只是需要更多输入
+            "command": "brainstorm",
+            "project_root": str(project_root),
+            "session_started": True,
+            "needs_more_input": True,
+            "round_prompts": prompts_for_user,
+            "fallback_options": fallback_opts,
+            "init_result": i_payload,
+            "generate_result": g_payload,
+            "next_step": (
+                "脑洞引导会话已初始化。请逐轮回答以下问题（或使用 collect 子命令收集答案），"
+                "完成后执行 generate 生成 idea_seed.md。"
+            ),
+        }
+
+    return {
+        "ok": True,
+        "command": "brainstorm",
+        "project_root": str(project_root),
+        "session_started": True,
+        "needs_more_input": False,
+        "init_result": i_payload,
+        "collect_result": c_payload,
+        "generate_result": g_payload,
+        "generated_files": g_payload.get("generated_files", []),
+        "next_step": "脑洞种子已生成。请审核 idea_seed.md，然后执行 /一键开书 正式开始写作。",
     }
 
 
@@ -1266,8 +2048,26 @@ def parse_args() -> argparse.Namespace:
     p_one.add_argument("--core-hook", default="高概念卖点待补充")
     p_one.add_argument("--ending", default="开放式结局（可后续修改）")
     p_one.add_argument("--target-words", type=int, default=3000000)
+    p_one.add_argument("--target-audience", default="", help="目标读者群体（如：18-35岁起点男频读者）")
+    p_one.add_argument("--writing-style", default="", help="写作风格（如：爽文快节奏/文艺慢叙事）")
+    p_one.add_argument("--core-taboo", default="", help="核心禁区（如：不写血腥/不写恋童）")
     p_one.add_argument("--overwrite", action="store_true")
     p_one.add_argument("--emit-json")
+
+    p_brain = sub.add_parser("brainstorm", help="执行 /脑洞建图（交互式脑洞引导）")
+    p_brain.add_argument("--project-root", required=True)
+    p_brain.add_argument("--genre", default="", help="预设题材")
+    p_brain.add_argument("--idea", default="", help="初始故事想法/书名提示")
+    p_brain.add_argument("--rounds", type=int, default=5, help="计划引导轮次")
+    p_brain.add_argument("--emit-json")
+
+    p_rev = sub.add_parser("revise-outline", help="执行 /改纲续写（锚点重算+图谱级联+索引重建）")
+    p_rev.add_argument("--project-root", required=True)
+    p_rev.add_argument("--from-chapter", type=int, required=True,
+                       help="改纲生效的起始章节号（含该章，必须 >= 1）")
+    p_rev.add_argument("--change-description", default="",
+                       help="本次改纲说明（如：调整卷二主线冲突方向）")
+    p_rev.add_argument("--emit-json")
 
     p_cont = sub.add_parser("continue-write", help="执行 /继续写")
     p_cont.add_argument("--project-root", required=True)
@@ -1306,7 +2106,7 @@ def parse_args() -> argparse.Namespace:
                         help="相邻章节字数差异限制，默认0.3（30%%）")
     p_cont.add_argument("--max-ai-phrase-density", type=float, default=0.05,
                         help="AI高频词密度限制，默认0.05（5%%）")
-    p_cont.add_argument("--auto-research", dest="auto_research", action="store_true", default=False,
+    p_cont.add_argument("--auto-research", dest="auto_research", action="store_true", default=True,
                         help="写前自动检测知识缺口并提示调研")
     p_cont.add_argument("--draft-provider", choices=["template", "llm"], default="template",
                         help="草稿生成策略：template(模板模式,默认) 或 llm(多LLM写作)")
@@ -1316,6 +2116,43 @@ def parse_args() -> argparse.Namespace:
                         help="LLM模型名称，需配合--draft-provider llm")
     p_cont.add_argument("--llm-api-key", default=None,
                         help="LLM API密钥，需配合--draft-provider llm")
+    p_cont.add_argument("--enable-constraints", dest="enable_constraints",
+                        action="store_true", default=True,
+                        help="写前注入大纲配额、反向刹车与事件推荐约束（默认开启）")
+    p_cont.add_argument("--no-constraints", dest="enable_constraints",
+                        action="store_false",
+                        help="禁用写前约束注入（高级用户）")
+    p_cont.add_argument("--auto-graph-update", dest="auto_graph_update",
+                        action="store_true", default=True,
+                        help="章节通过门禁后自动生成图谱更新建议（默认开启）")
+    p_cont.add_argument("--no-graph-update", dest="auto_graph_update",
+                        action="store_false",
+                        help="禁用图谱自动更新")
+    p_cont.add_argument("--auto-batch-review", dest="auto_batch_review",
+                        action="store_true", default=True,
+                        help="章节数达到10/20/30...时自动生成批量审核任务（默认开启）")
+    p_cont.add_argument("--no-batch-review", dest="auto_batch_review",
+                        action="store_false",
+                        help="禁用每10章批量审核")
+    p_cont.add_argument("--no-research", dest="auto_research",
+                        action="store_false",
+                        help="禁用写前知识缺口调研")
+    p_cont.add_argument("--use-beat-sheet", dest="use_beat_sheet",
+                        action="store_true", default=True,
+                        help="使用 Beat Sheet 流水线写作（默认开启）")
+    p_cont.add_argument("--no-beat-sheet", dest="use_beat_sheet",
+                        action="store_false",
+                        help="禁用 Beat Sheet 流水线，回退到普通草稿模式")
+    p_cont.add_argument("--beat-count", type=int, default=4,
+                        help="每章 Beat 数量（3-5），默认 4")
+    p_cont.add_argument("--auto-style-update", dest="auto_style_update",
+                        action="store_true", default=True,
+                        help="每 N 章自动更新风格基准（默认开启）")
+    p_cont.add_argument("--no-style-update", dest="auto_style_update",
+                        action="store_false",
+                        help="禁用风格基准自动更新")
+    p_cont.add_argument("--style-update-interval", type=int, default=10,
+                        help="风格更新章节间隔，默认 10")
     p_cont.add_argument("--emit-json")
 
     return p.parse_args()
@@ -1323,7 +2160,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    payload = one_click(args) if args.cmd == "one-click" else continue_write(args)
+    _dispatch = {
+        "one-click": one_click,
+        "brainstorm": cmd_brainstorm,
+        "revise-outline": cmd_revise_outline,
+        "continue-write": continue_write,
+    }
+    _handler = _dispatch.get(args.cmd)
+    if _handler is None:
+        payload: Dict[str, object] = {"ok": False, "error": f"unknown_command:{args.cmd}"}
+    else:
+        payload = _handler(args)
     if args.emit_json:
         jp = Path(args.emit_json).expanduser().resolve()
         ensure_dir(jp.parent)

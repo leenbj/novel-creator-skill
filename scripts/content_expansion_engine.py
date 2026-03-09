@@ -232,9 +232,9 @@ class ContentExpansionEngine:
     def _deepen_psychology(self, text: str, amount: int, context: ExpansionContext) -> str:
         """心理描写深化实现"""
         psych_templates = [
-            f"{context.characters.get('protagonist', '他')}心中{random.choice(['暗自思忖', '反复盘算', '默默思索'])}：{random.choice(["这一步走得是否正确？", '接下来该如何应对？', '对方究竟有何目的？'])}。",
+            f"{context.characters.get('protagonist', '他')}心中{random.choice(['暗自思忖', '反复盘算', '默默思索'])}：{random.choice(['这一步走得是否正确？', '接下来该如何应对？', '对方究竟有何目的？'])}。",
             f"{random.choice(['尽管表面上镇定自若', '虽然神色如常', '即便保持着微笑'])}，{context.characters.get('protagonist', '他')}的内心却{random.choice(['波涛汹涌', '思绪万千', '难以平静'])}。",
-            f"{context.characters.get('protagonist', '他')}暗暗{random.choice(['下定决心', '发誓', '立下决心'])}：{random.choice(["无论如何都要完成任务。", '绝不能让信任自己的人失望。', '这一次，一定要成功。'])}。",
+            f"{context.characters.get('protagonist', '他')}暗暗{random.choice(['下定决心', '发誓', '立下决心'])}：{random.choice(['无论如何都要完成任务。', '绝不能让信任自己的人失望。', '这一次，一定要成功。'])}。",
         ]
         
         selected = random.sample(psych_templates, min(2, len(psych_templates)))

@@ -81,10 +81,9 @@ def check_quality_report(path: Path) -> Tuple[bool, str]:
     m = re.search(r"通过：\s*(True|False)", txt)
     if not m:
         return False, "quality_report 缺少\"通过：True/False\"结论"
-    if m.group(1) != "True":
-        return False, "quality_report 显示未通过"
+    report_passed = (m.group(1) == "True")
 
-    # P0-01: 检查段落重复度指标
+    # 检查段落重复度指标（无论总体是否通过都执行，确保输出详细失败信息）
     dup_failures = []
 
     # 解析段落唯一比例
@@ -109,8 +108,13 @@ def check_quality_report(path: Path) -> Tuple[bool, str]:
         except ValueError:
             pass
 
+    failures: List[str] = []
+    if not report_passed:
+        failures.append("quality_report 显示未通过")
     if dup_failures:
-        return False, "段落重复度检查失败: " + "; ".join(dup_failures)
+        failures.append("段落重复度检查失败: " + "; ".join(dup_failures))
+    if failures:
+        return False, "；".join(failures)
 
     return True, "通过"
 

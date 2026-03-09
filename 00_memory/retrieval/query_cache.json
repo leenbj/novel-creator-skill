@@ -1,0 +1,64 @@
+{
+  "entries": {
+    "abd6ba03d6f73d6f216fbc71b37e237b04bafaae": {
+      "saved_at": "2026-03-08 18:41:44",
+      "result": {
+        "query": "主角在站台发现名单并与同伴发生冲突",
+        "query_entities": [],
+        "index_signature": "1-c6e9262b6b27fb61",
+        "retrieved": [
+          {
+            "score": 5.5,
+            "reason": {
+              "token_overlap": 2,
+              "summary_overlap": 2,
+              "entity_overlap": 0,
+              "event_overlap": 1,
+              "recency": 1.0,
+              "conflict_bonus": 0.2
+            },
+            "chapter_file": "第1章-开篇待写.md",
+            "chapter_path": "/Users/ethan/Desktop/小说/novel-creator-skill/03_manuscript/第1章-开篇待写.md",
+            "summary": "# 第1章 开篇 <!-- NOVEL_FLOW_STUB --> ## 本章目标 - 建立主角目标：明确主角核心目标 - 落地核心冲突：主线冲突待细化 ## 场景草图 - 起始地点： - 冲突触发点： - 章末钩子： ## 正文 [待写]",
+            "entities": [],
+            "events": [
+              "冲突"
+            ],
+            "locations": [],
+            "foreshadow_refs": [],
+            "passages": [
+              {
+                "score": 2.0,
+                "reason": {
+                  "token_overlap": 2,
+                  "entity_overlap": 0
+                },
+                "text": "## 本章目标\n- 建立主角目标：明确主角核心目标\n- 落地核心冲突：主线冲突待细化"
+              },
+              {
+                "score": 1.0,
+                "reason": {
+                  "token_overlap": 1,
+                  "entity_overlap": 0
+                },
+                "text": "## 场景草图\n- 起始地点：\n- 冲突触发点：\n- 章末钩子："
+              }
+            ]
+          }
+        ],
+        "relation_snippets": [],
+        "retrieval_stats": {
+          "docs_total": 1,
+          "candidate_pool": 1,
+          "rerank_topk": 1,
+          "estimated_context_chars": 74
+        },
+        "cache_hit": false,
+        "skipped": false,
+        "trigger_reason": [
+          "命中剧情关键词:冲突"
+        ]
+      }
+    }
+  }
+}
