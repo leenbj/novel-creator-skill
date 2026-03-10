@@ -1208,6 +1208,17 @@ def _generate_beat_draft(
     return False, "synthesize_no_output"
 
 
+def _next_fix_block_index(text: str, prefix: str) -> int:
+    """Calculate next fix block index to avoid duplicate numbering across rounds."""
+    matches = [int(m) for m in re.findall(rf"{re.escape(prefix)}(\d+)", text)]
+    return (max(matches) + 1) if matches else 1
+
+
+def _count_dialogue_chars(text: str) -> int:
+    """Count dialogue characters (text inside Chinese quotation marks)."""
+    return sum(len(m.group(1)) for m in re.finditer(r"[""]([^""]*)[""]", text))
+
+
 def apply_targeted_quality_fix(
     chapter_path: Path,
     quality: Dict[str, object],
@@ -1525,6 +1536,9 @@ def auto_fix_after_gate_failure(
     failures_raw = gate_payload.get("failures", []) if isinstance(gate_payload, dict) else []
     failures = failures_raw if isinstance(failures_raw, list) else []
     fail_text = " | ".join(str(x) for x in failures)
+    gate_dir = project_root / "04_editing" / "gate_artifacts" / slugify(chapter_path.stem)
+    ensure_dir(gate_dir)
+    need_rebuild_gate_artifacts = False
 
     if "knowledge_base_contains_chapter_files" in fail_text and args.auto_fix_kb_misplaced:
         moved = move_misplaced_kb_chapters(project_root)
@@ -1535,6 +1549,7 @@ def auto_fix_after_gate_failure(
         new_path, moved = normalize_chapter_storage(project_root, chapter_path)
         chapter_path = new_path
         if moved:
+            need_rebuild_gate_artifacts = True
             actions.append(f"修正章节存储位置：{moved}")
 
     if any(
@@ -1548,12 +1563,7 @@ def auto_fix_after_gate_failure(
             "publish_ready_keyword",
         ]
     ):
-        write_gate_artifacts(project_root, chapter_path, query, quality, query_payload)
-        actions.append("重建门禁产物文件")
-
-        # 注意：不再无条件追加"可发布"关键词。
-        # publish_ready.md 由 write_gate_artifacts() 根据实际质量结果写入正确结论，
-        # 强行补关键词会绕过门禁，制造假阳性通过。
+        need_rebuild_gate_artifacts = True
 
     if "quality_baseline" in fail_text and args.auto_fix_quality:
         old_quality = dict(quality)
@@ -1561,9 +1571,13 @@ def auto_fix_after_gate_failure(
         if quality_actions:
             actions.extend([f"质量最小修复：{x}" for x in quality_actions])
             quality = evaluate_quality(read_text(chapter_path), args)
-            gate_dir = project_root / "04_editing" / "gate_artifacts" / slugify(chapter_path.stem)
-            ensure_dir(gate_dir)
             write_quality_report(gate_dir, old_quality, quality)
+            need_rebuild_gate_artifacts = True
+
+    # 所有修复完成后统一重建门禁产物，确保时间戳晚于章节文件
+    if need_rebuild_gate_artifacts:
+        write_gate_artifacts(project_root, chapter_path, query, quality, query_payload)
+        actions.append("重建门禁产物文件")
 
     return chapter_path, actions, quality
 
