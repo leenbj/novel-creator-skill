@@ -1421,7 +1421,8 @@ def write_gate_artifacts(
 - 发布建议：参考下方检测报告后执行两遍式润色
 {humanizer_section}
 """
-    quality_ok: bool = bool(quality.get("ok", False))
+    # evaluate_quality() 返回 "passed" 键；兼容上游可能传入 "ok" 键的场景
+    quality_ok: bool = bool(quality.get("passed", quality.get("ok", False)))
     quality_failures: List[str] = list(quality.get("failures", []))  # type: ignore[arg-type]
     if quality_ok:
         publish_verdict = "可发布（通过）"
@@ -1550,12 +1551,9 @@ def auto_fix_after_gate_failure(
         write_gate_artifacts(project_root, chapter_path, query, quality, query_payload)
         actions.append("重建门禁产物文件")
 
-        publish_ready = project_root / "04_editing" / "gate_artifacts" / slugify(chapter_path.stem) / "publish_ready.md"
-        txt = read_text(publish_ready)
-        if ("可发布" not in txt) and ("通过" not in txt) and ("PASS" not in txt):
-            txt += "\n可发布\n"
-            write_text(publish_ready, txt)
-            actions.append("补充发布关键词")
+        # 注意：不再无条件追加"可发布"关键词。
+        # publish_ready.md 由 write_gate_artifacts() 根据实际质量结果写入正确结论，
+        # 强行补关键词会绕过门禁，制造假阳性通过。
 
     if "quality_baseline" in fail_text and args.auto_fix_quality:
         old_quality = dict(quality)
