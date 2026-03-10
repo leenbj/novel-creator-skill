@@ -84,6 +84,38 @@ def _resolve_pacing_mode(value: Optional[str]) -> str:
     return value if value in PACING_MODE_PROFILES else "standard"
 
 
+def _infer_pacing_tier(event_types: List[str]) -> str:
+    """从事件类型列表推断节奏档位，与 pacing_tracker.infer_tier_from_event_types 保持一致。"""
+    event_set = {str(t) for t in event_types}
+    fast_types = {"conflict_thrill", "tension_escalation"}
+    slow_types = {"bond_deepening", "world_painting"}
+    has_fast = bool(event_set & fast_types)
+    has_slow = bool(event_set & slow_types)
+    if has_fast and has_slow:
+        return "medium"
+    if has_fast:
+        return "fast"
+    if has_slow:
+        return "slow"
+    return "medium"
+
+
+_VALID_EVENT_TYPES: set = {
+    "conflict_thrill", "bond_deepening",
+    "faction_building", "world_painting", "tension_escalation",
+}
+
+
+def _extract_event_types_from_constraints(constraints: object) -> List[str]:
+    """从 writing_constraints 中提取已过滤的有效事件类型列表。"""
+    if not isinstance(constraints, dict):
+        return []
+    event_rec = constraints.get("event_recommendation")
+    if not isinstance(event_rec, dict):
+        return []
+    rec_types = event_rec.get("recommended_types", []) or []
+    return [str(t) for t in rec_types if str(t) in _VALID_EVENT_TYPES]
+
 
 # 环境变量：标记当前是否在 Claude Code / Codex 等 CLI 工具中运行
 # 设置此变量后，系统将使用 MCP Codex 工具进行写作，无需外部 API Key
@@ -1658,10 +1690,20 @@ def write_gate_artifacts(
     return written
 
 
-def run_gate_check(project_root: Path, chapter_path: Path) -> Tuple[int, Dict[str, object]]:
+def run_gate_check(
+    project_root: Path,
+    chapter_path: Path,
+    pacing_tier: Optional[str] = None,
+    pacing_event_types: str = "",
+) -> Tuple[int, Dict[str, object]]:
+    extra: List[str] = []
+    if pacing_tier:
+        extra.extend(["--pacing-tier", pacing_tier])
+    if pacing_event_types:
+        extra.extend(["--pacing-event-types", pacing_event_types])
     code, out, err, payload = run_python(
         SCRIPT_DIR / "chapter_gate_check.py",
-        ["--project-root", str(project_root), "--chapter-file", str(chapter_path)],
+        ["--project-root", str(project_root), "--chapter-file", str(chapter_path), *extra],
     )
     if payload is not None:
         return code, payload
@@ -2076,9 +2118,16 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
         retry_actions: List[str] = []
         gate_passed_final = False
 
+        # 提前提取事件类型和节奏档位，传给门禁做"含当前章"的预演校验
+        _gate_event_types = _extract_event_types_from_constraints(writing_constraints)
+        _gate_pacing_tier = _infer_pacing_tier(_gate_event_types) if _gate_event_types else None
+        _gate_pacing_et_str = ",".join(_gate_event_types)
+
         if not draft_mode:
             write_gate_artifacts(project_root, chapter_path, writing_query, quality_after, q_payload)
-            _, gate_payload = run_gate_check(project_root, chapter_path)
+            _, gate_payload = run_gate_check(
+                project_root, chapter_path, _gate_pacing_tier, _gate_pacing_et_str
+            )
             gate_passed_final = bool(gate_payload.get("passed")) if isinstance(gate_payload, dict) else False
 
             retry_rounds = 0
@@ -2096,7 +2145,9 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                     break
                 retry_actions.extend(actions)
                 retry_rounds += 1
-                _, gate_payload = run_gate_check(project_root, chapter_path)
+                _, gate_payload = run_gate_check(
+                    project_root, chapter_path, _gate_pacing_tier, _gate_pacing_et_str
+                )
                 gate_passed_final = bool(gate_payload.get("passed")) if isinstance(gate_payload, dict) else False
 
             if not gate_passed_final:
@@ -2154,6 +2205,31 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                      "--project-root", str(project_root),
                      "--to-chapter", str(_chapter_no + 1)],
                 )
+            # 事件矩阵记录：门禁通过后记录本章实际使用的事件类型，维持冷却状态
+            if args.enable_constraints and _chapter_no > 0:
+                _filtered_types = _extract_event_types_from_constraints(writing_constraints)
+                if _filtered_types:
+                    run_python(
+                        SCRIPT_DIR / "event_matrix_scheduler.py",
+                        [
+                            "record",
+                            "--project-root", str(project_root),
+                            "--chapter", str(_chapter_no),
+                            "--types", ",".join(_filtered_types),
+                        ],
+                    )
+                    # 节奏档位记录：从事件类型推断档位并写入 pacing_history.json
+                    _pacing_tier = _infer_pacing_tier(_filtered_types)
+                    run_python(
+                        SCRIPT_DIR / "pacing_tracker.py",
+                        [
+                            "record",
+                            "--project-root", str(project_root),
+                            "--chapter", str(_chapter_no),
+                            "--tier", _pacing_tier,
+                            "--event-types", ",".join(_filtered_types),
+                        ],
+                    )
             # 风格基准自动更新：每 N 章（默认10章）更新一次
             style_update_file: Optional[str] = None
             if getattr(args, "auto_style_update", True):

@@ -8,10 +8,17 @@ import argparse
 import datetime as dt
 import json
 import re
+import sys
+import types
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from common import slugify
+
+# 确保同目录脚本可直接 import
+_SCRIPT_DIR = Path(__file__).parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 
 def resolve_chapter(project_root: Path, chapter_file: str) -> Path:
@@ -119,6 +126,87 @@ def check_quality_report(path: Path) -> Tuple[bool, str]:
     return True, "通过"
 
 
+def check_pacing_review(path: Path) -> Tuple[bool, str]:
+    """解析 pacing_review.md 的综合结论字段。
+
+    期望格式：
+        节奏审查: 通过
+        节奏审查: 失败
+        失败原因: <原因>
+    """
+    txt = path.read_text(encoding="utf-8", errors="ignore")
+    m = re.search(r"节奏审查[：:]\s*(通过|失败)", txt)
+    if not m:
+        return False, "pacing_review.md 缺少「节奏审查: 通过/失败」结论行"
+    if m.group(1) == "失败":
+        reason_m = re.search(r"失败原因[：:]\s*(.+)", txt)
+        reason = reason_m.group(1).strip() if reason_m else "未说明原因"
+        return False, f"节奏审查失败：{reason}"
+    return True, "通过"
+
+
+def generate_script_pacing_review(
+    tier: str,
+    triggered_quotas: List[str],
+    has_suspense: bool,
+    arg_errors: List[str],
+    pt_errors: List[str],
+) -> str:
+    """Python 自动模式下，从脚本检查结果生成 pacing_review.md（无需 LLM）。
+
+    Claude Code 对话模式下此函数不被调用；Claude 直接写入语义分析内容。
+    """
+    quota_violated = len(triggered_quotas) >= 2
+    pacing_errors = arg_errors + pt_errors
+    passed = not quota_violated and not pacing_errors
+
+    tier_map = {"fast": "快档", "medium": "中档", "slow": "慢档"}
+    tier_zh = tier_map.get(tier, "未知")
+
+    a_status = "触发" if "A" in triggered_quotas else "未触发"
+    b_status = "触发" if "B" in triggered_quotas else "未触发"
+    c_status = "触发" if "C" in triggered_quotas else "未触发"
+
+    suspense_level = "中" if has_suspense else "无"
+    fail_reason = "；".join(pacing_errors) if pacing_errors else "无"
+
+    verdict = "通过" if passed else "失败"
+
+    return f"""# 节奏审查报告（脚本自动生成）
+
+> 本报告由 chapter_gate_check.py 脚本自动生成，基于 anti_resolution_guard 和 pacing_tracker 检查结果。
+> Claude Code 对话模式下应由 `/节奏审查` 步骤生成语义版本替换本文件。
+
+## 一、档位判断
+- **本章档位**：{tier_zh}
+- **判断依据**：由写前 event_matrix 推荐的事件类型推断
+
+## 二、A/B/C 配额核查
+- **A（主线矛盾实质推进）**：{a_status} — 关键词检测
+- **B（主要关系决定性升级）**：{b_status} — 关键词检测
+- **C（核心秘密完整揭露）**：{c_status} — 关键词检测
+- **配额违规**：{"是" if quota_violated else "否"}（同时触发 ≥2项 = 违规）
+
+## 三、章末悬念质量
+- **悬念等级**：{suspense_level}（脚本关键词检测）
+- **具体悬念内容**：脚本模式下不做语义分析
+
+## 四、隐性加速检测
+- **是否存在关键词未覆盖的隐性加速**：否（脚本模式不做语义分析）
+- **说明**：如需语义检测，请在 Claude Code 对话中执行 `/节奏审查`
+
+## 综合结论
+节奏审查: {verdict}
+失败原因: {fail_reason}
+"""
+
+
+def extract_chapter_number(raw: str) -> int:
+    """从章节标识或文件名中提取首个数字序列作为章节号。"""
+    m = re.search(r"(\d+)", raw or "")
+    return int(m.group(1)) if m else 0
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="检查章节是否完成强制门禁：更新记忆→一致性→风格校准→校稿")
     p.add_argument("--project-root", required=True, help="小说项目根目录")
@@ -131,6 +219,10 @@ def parse_args() -> argparse.Namespace:
         help="publish_ready.md 必须命中的关键字，逗号分隔",
     )
     p.add_argument("--emit-json", help="额外导出 JSON 结果路径")
+    p.add_argument("--pacing-tier", choices=["slow", "medium", "fast"],
+                   help="当前章预期节奏档位（传入 pacing_tracker check 做预演）")
+    p.add_argument("--pacing-event-types", default="",
+                   help="当前章事件类型，逗号分隔（档位推断用）")
     return p.parse_args()
 
 
@@ -228,6 +320,138 @@ def main() -> int:
         result["checks"].append(item)
         if not ok:
             result["failures"].append(f"quality_baseline: {msg}")
+
+    # ── 反向刹车校验（anti_resolution_guard check）────────────────────
+    # 检查章末悬念、禁止揭露、分辨率信号，将 errors → failures / warnings → warnings
+    try:
+        import anti_resolution_guard as _arg_mod  # noqa: PLC0415
+
+        _arg_cfg = _arg_mod.AntiResConfig()
+        _arg_args = types.SimpleNamespace(
+            project_root=str(project_root),
+            chapter_file=str(chapter_path),
+            is_finale=False,
+        )
+        _arg_result: Dict[str, Any] = _arg_mod.cmd_check(_arg_args, _arg_cfg)
+
+        _arg_errors: List[str] = _arg_result.get("errors", []) or []
+        _arg_warnings: List[str] = _arg_result.get("warnings", []) or []
+        _arg_checks: Dict[str, Any] = _arg_result.get("checks", {}) or {}
+
+        result["checks"].append(
+            {
+                "name": "anti_resolution_guard",
+                "path": str(chapter_path),
+                "ok": len(_arg_errors) == 0,
+                "message": "通过" if not _arg_errors else "；".join(_arg_errors),
+                "details": _arg_checks,
+            }
+        )
+        for _e in _arg_errors:
+            result["failures"].append(f"anti_resolution_guard: {_e}")
+        for _w in _arg_warnings:
+            result["warnings"].append(f"anti_resolution_guard: {_w}")
+    except Exception as _exc:
+        # 脚本不可用时降级为警告，不阻断门禁
+        result["warnings"].append(f"anti_resolution_guard 不可用（跳过）: {_exc}")
+        result["checks"].append(
+            {
+                "name": "anti_resolution_guard",
+                "path": str(chapter_path),
+                "ok": True,
+                "message": f"跳过（脚本加载失败）: {_exc}",
+            }
+        )
+
+    # ── 节奏档位校验（pacing_tracker check）────────────────────────
+    # 校验卷内快档配额、慢档密度、连续快档上限
+    try:
+        import pacing_tracker as _pt_mod  # noqa: PLC0415
+
+        _pt_cfg = _pt_mod.PacingConfig()
+        _ch_no = extract_chapter_number(chapter_id)
+        _pt_args = types.SimpleNamespace(
+            project_root=str(project_root),
+            chapter=_ch_no,
+            max_fast_per_volume=_pt_cfg.max_fast_per_volume,
+            # 传入当前章预期档位，让 check 做"含本章"的预演校验
+            current_tier=getattr(args, "pacing_tier", None),
+            current_event_types=getattr(args, "pacing_event_types", "") or "",
+        )
+        _pt_result: Dict[str, Any] = _pt_mod.cmd_check(_pt_args, _pt_cfg)
+
+        _pt_errors: List[str] = _pt_result.get("errors", []) or []
+        _pt_warnings: List[str] = _pt_result.get("warnings", []) or []
+
+        result["checks"].append(
+            {
+                "name": "pacing_tracker",
+                "path": str(project_root / "00_memory" / "pacing_history.json"),
+                "ok": len(_pt_errors) == 0,
+                "message": "通过" if not _pt_errors else "；".join(_pt_errors),
+                "details": {
+                    "chapter": _ch_no,
+                    "volume": _pt_result.get("volume"),
+                    "stats": _pt_result.get("stats", {}),
+                },
+            }
+        )
+        for _e in _pt_errors:
+            result["failures"].append(f"pacing_tracker: {_e}")
+        for _w in _pt_warnings:
+            result["warnings"].append(f"pacing_tracker: {_w}")
+    except Exception as _exc:
+        result["warnings"].append(f"pacing_tracker 不可用（跳过）: {_exc}")
+        result["checks"].append(
+            {
+                "name": "pacing_tracker",
+                "path": str(project_root / "00_memory" / "pacing_history.json"),
+                "ok": True,
+                "message": f"跳过（脚本加载失败）: {_exc}",
+            }
+        )
+
+    # ── 节奏审查（pacing_review.md）────────────────────────────────
+    # 优先使用 Claude Code 写入的语义版本；不存在时从脚本检查结果自动生成。
+    _pr_path = gate_dir / "pacing_review.md"
+    if not _pr_path.exists():
+        # 从已完成的脚本检查中提取数据，生成回退版本
+        _pr_arg_check = next(
+            (c for c in result["checks"] if c.get("name") == "anti_resolution_guard"), {}
+        )
+        _pr_pt_check = next(
+            (c for c in result["checks"] if c.get("name") == "pacing_tracker"), {}
+        )
+        _pr_quota = (_pr_arg_check.get("details") or {}).get("quota_abc") or {}
+        _pr_triggered = _pr_quota.get("triggered_quotas") or []
+        _pr_suspense = ((_pr_arg_check.get("details") or {}).get("tail_suspense") or {}).get(
+            "has_suspense", True
+        )
+        _pr_tier = ((_pr_pt_check.get("details") or {}).get("current_tier")) or "medium"
+        _pr_arg_errors: List[str] = [
+            f for f in result["failures"] if f.startswith("anti_resolution_guard:")
+        ]
+        _pr_pt_errors: List[str] = [
+            f for f in result["failures"] if f.startswith("pacing_tracker:")
+        ]
+        _pr_content = generate_script_pacing_review(
+            _pr_tier, _pr_triggered, _pr_suspense, _pr_arg_errors, _pr_pt_errors
+        )
+        _pr_path.write_text(_pr_content, encoding="utf-8")
+        result["warnings"].append("pacing_review.md 不存在，已从脚本检查结果自动生成（建议在 Claude Code 中执行 /节奏审查 获取语义版本）")
+
+    if _pr_path.exists() and _pr_path.stat().st_size >= args.min_bytes:
+        _pr_ok, _pr_msg = check_pacing_review(_pr_path)
+        result["checks"].append(
+            {
+                "name": "pacing_review_semantic",
+                "path": str(_pr_path),
+                "ok": _pr_ok,
+                "message": _pr_msg,
+            }
+        )
+        if not _pr_ok:
+            result["failures"].append(f"pacing_review_semantic: {_pr_msg}")
 
     result["passed"] = len(result["failures"]) == 0
 

@@ -48,6 +48,28 @@ class AntiResConfig:
         "彻底击败", "完全消灭", "一劳永逸", "最终胜利",
     ])
 
+    # ── A/B/C 配额信号 ───────────────────────────────────────────────
+    # A：主线矛盾实质推进（主线格局大变，不是小摩擦）
+    quota_a_signals: List[str] = field(default_factory=lambda: [
+        "格局大变", "局面逆转", "关键突破", "核心矛盾激化", "决定性",
+        "彻底扭转", "正面对决", "一举击破", "实质推进", "重大转折",
+        "扭转乾坤", "形势骤变", "大局已定",
+    ])
+    # B：主要关系决定性升级（盟友/对立/情感关键节点）
+    quota_b_signals: List[str] = field(default_factory=lambda: [
+        "结为", "盟誓", "彻底决裂", "宣战", "告白", "成婚",
+        "义结", "反目成仇", "不共戴天", "永结", "决定性关系",
+        "立下誓约", "彻底翻脸", "情定终身",
+    ])
+    # C：核心秘密完整揭露（不是暗示，是完全曝光）
+    quota_c_signals: List[str] = field(default_factory=lambda: [
+        "真相大白", "秘密终于", "真实身份", "原来竟是",
+        "全部揭露", "真正面目", "彻底曝光", "一切都是",
+        "谜底揭开", "终于真相", "身份暴露",
+    ])
+    # 同时命中 ≥ quota_check_threshold 项配额 → 硬错误
+    quota_check_threshold: int = 2
+
 
 # ── 内部工具 ──────────────────────────────────────────────────────
 
@@ -104,6 +126,33 @@ def _check_forbidden_reveals(text: str, forbidden: List[str]) -> Dict[str, Any]:
     }
 
 
+def _check_quota_abc(text: str, cfg: AntiResConfig) -> Dict[str, Any]:
+    """检查 A/B/C 配额信号命中情况。
+
+    每章至多触发1项配额（Iron Law第6条）：
+    - A: 主线矛盾实质推进
+    - B: 主要关系决定性升级
+    - C: 核心秘密完整揭露
+    """
+    def _scan(signals: List[str], label: str) -> Dict[str, Any]:
+        hits = [s for s in signals if s in text]
+        return {"label": label, "triggered": len(hits) > 0, "hits": hits}
+
+    results = {
+        "A": _scan(cfg.quota_a_signals, "A（主线矛盾推进）"),
+        "B": _scan(cfg.quota_b_signals, "B（主要关系升级）"),
+        "C": _scan(cfg.quota_c_signals, "C（核心秘密揭露）"),
+    }
+    triggered = [k for k, v in results.items() if v["triggered"]]
+    return {
+        "quota_a": results["A"],
+        "quota_b": results["B"],
+        "quota_c": results["C"],
+        "triggered_count": len(triggered),
+        "triggered_quotas": triggered,
+    }
+
+
 # ── 子命令 ────────────────────────────────────────────────────────
 
 def cmd_check(args: argparse.Namespace, cfg: AntiResConfig) -> Dict[str, Any]:
@@ -129,13 +178,13 @@ def cmd_check(args: argparse.Namespace, cfg: AntiResConfig) -> Dict[str, Any]:
             "checks": {},
         }
 
-    # 执行三项检查
-    core_conflicts = _extract_core_conflicts(anchors)
+    # 执行四项检查
     forbidden = anchors.get("current_node", {}).get("forbidden_reveals", [])
 
     tail_result = _check_tail_suspense(text, cfg)
     resolution_result = _check_resolution_signals(text, cfg)
     reveal_result = _check_forbidden_reveals(text, forbidden)
+    quota_result = _check_quota_abc(text, cfg)
 
     errors: List[str] = []
     warnings: List[str] = []
@@ -154,6 +203,17 @@ def cmd_check(args: argparse.Namespace, cfg: AntiResConfig) -> Dict[str, Any]:
     if not tail_result["has_suspense"]:
         warnings.append("章末未检测到悬念元素，建议添加钩子")
 
+    # 规则4：A/B/C 配额（Iron Law第6条：每章至多触发1项）
+    triggered_count = quota_result["triggered_count"]
+    triggered_quotas = quota_result["triggered_quotas"]
+    if triggered_count >= cfg.quota_check_threshold:
+        errors.append(
+            f"A/B/C 配额违规：单章同时触发 {triggered_count} 项"
+            f"（{', '.join(triggered_quotas)}），每章至多触发1项"
+        )
+    elif triggered_count == 1:
+        warnings.append(f"A/B/C 配额已使用 1 项（{triggered_quotas[0]}），请确认节奏档位")
+
     passed = len(errors) == 0
 
     return {
@@ -167,6 +227,7 @@ def cmd_check(args: argparse.Namespace, cfg: AntiResConfig) -> Dict[str, Any]:
             "tail_suspense": tail_result,
             "resolution_signals": resolution_result,
             "forbidden_reveals": reveal_result,
+            "quota_abc": quota_result,
         },
     }
 
