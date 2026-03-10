@@ -1127,6 +1127,14 @@ def write_chapter(
     full_prompt = prompt_generator.generate_prompt()
     system_prompt = get_system_prompt(context.chapter_no)
 
+    # 允许外部（如 novel_flow_executor）通过 config_overrides 完全覆盖提示词。
+    # writing_prompt 优先级高于 PromptGenerator 生成的模板提示词；
+    # writing_system_prompt_override 可替换小说家人格 system prompt（用于场景分解等任务）。
+    if config.get("writing_prompt"):
+        full_prompt = str(config["writing_prompt"])
+    if config.get("writing_system_prompt_override"):
+        system_prompt = str(config["writing_system_prompt_override"])
+
     if dry_run:
         return {
             "ok": True,
@@ -1151,7 +1159,7 @@ def write_chapter(
         ai_score_before = 0.0
         ai_score_after = 0.0
         humanizer_applied = False
-        if _HUMANIZER_AVAILABLE and not config.get("skip_humanizer", False):
+        if _HUMANIZER_AVAILABLE and config.get("humanizer_enabled", True) and not config.get("skip_humanizer", False):
             try:
                 detection = _humanizer_detect(generated_content)
                 ai_score_before = float(detection.get("ai_score", 0))
