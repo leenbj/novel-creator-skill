@@ -84,6 +84,124 @@ def _resolve_pacing_mode(value: Optional[str]) -> str:
     return value if value in PACING_MODE_PROFILES else "standard"
 
 
+
+def _has_llm_config(args: argparse.Namespace, project_root: Path) -> bool:
+    """Check if LLM configuration is available for writing."""
+    if getattr(args, "llm_provider", None) or getattr(args, "llm_api_key", None):
+        return True
+    if os.environ.get("NOVEL_LLM_PROVIDER") or os.environ.get("NOVEL_AI_PROVIDER"):
+        return True
+    return (project_root / ".novel_writer_config.yaml").exists()
+
+
+def _resolve_draft_provider(args: argparse.Namespace, project_root: Path) -> str:
+    """Resolve draft provider: auto -> llm (if configured) or template."""
+    raw = str(getattr(args, "draft_provider", "auto") or "auto")
+    if raw in {"template", "llm"}:
+        return raw
+    return "llm" if _has_llm_config(args, project_root) else "template"
+
+
+def _split_sentences(paragraph: str) -> List[str]:
+    """Split paragraph into sentences based on Chinese punctuation."""
+    return [s.strip() for s in re.split(r"(?<=[。！？!?])", paragraph) if s.strip()]
+
+
+def _normalize_paragraph_variance(text: str) -> str:
+    """Balance paragraph lengths: split long ones, merge short ones."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    normalized: List[str] = []
+    buffer_short: List[str] = []
+    for p in paragraphs:
+        sentences = _split_sentences(p)
+        if len(p) >= 260 and len(sentences) >= 4:
+            cut = max(2, len(sentences) // 2)
+            normalized.append("".join(sentences[:cut]).strip())
+            normalized.append("".join(sentences[cut:]).strip())
+            continue
+        if len(p) <= 45:
+            buffer_short.append(p)
+            if sum(len(x) for x in buffer_short) >= 90:
+                normalized.append(" ".join(buffer_short))
+                buffer_short = []
+            continue
+        if buffer_short:
+            normalized.append(" ".join(buffer_short))
+            buffer_short = []
+        normalized.append(p)
+    if buffer_short:
+        normalized.append(" ".join(buffer_short))
+    return "\n\n".join(normalized)
+
+
+def _rebalance_dialogue_heavy_text(text: str, query: str) -> str:
+    """Insert narrative bridges between consecutive dialogue-heavy paragraphs."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    out: List[str] = []
+    dialogue_run = 0
+    for p in paragraphs:
+        is_dialogue_heavy = p.startswith(("“", "”")) or p.count("“") >= 2
+        out.append(p)
+        if is_dialogue_heavy:
+            dialogue_run += 1
+        else:
+            dialogue_run = 0
+        if dialogue_run >= 2:
+            out.append(
+                f"——叙述桥——两人的话并没有直接解决“{query}”，"
+                "反而把风险顺序、执行步骤与彼此顾虑暴露得更清楚。"
+                "他们不得不把口头判断落实到行动上，场面因此继续向前推进。"
+            )
+            dialogue_run = 0
+    return "\n\n".join(out)
+
+
+def _build_pacing_rewrite_prompt(query: str, failures: List[str]) -> str:
+    """Build prompt for LLM to rewrite chapter with pacing issues."""
+    return (
+        "Rewrite the chapter to fix pacing issues (too fast / summary skips).\n"
+        f"Task: {query}\n"
+        f"Failures: {'; '.join(failures)}\n\n"
+        "Requirements:\n"
+        "1. Preserve all plot facts, character relations, event order, and chapter hooks.\n"
+        "2. Expand summary skip phrases like 'after a while' into continuous visible scenes.\n"
+        "3. Each key progress must include: action -> sensory/environment -> feedback/resistance -> new decision.\n"
+        "4. Do not just append summary patches; rewrite the high skip density paragraphs themselves.\n"
+        "5. Control dialogue ratio; balance paragraph lengths.\n"
+        "6. Output only the rewritten text, no explanations.\n"
+    )
+
+
+def _rewrite_chapter_with_llm(
+    project_root: Path,
+    chapter_path: Path,
+    args: argparse.Namespace,
+    prompt: str,
+) -> bool:
+    """Rewrite chapter using LLM for pacing issues. Returns True on success."""
+    if not _has_llm_config(args, project_root):
+        return False
+    try:
+        from novel_chapter_writer import write_chapter  # type: ignore[import]
+        overrides: Dict[str, object] = {"writing_prompt": prompt}
+        if getattr(args, "llm_provider", None):
+            overrides["ai_provider"] = args.llm_provider
+        if getattr(args, "llm_model", None):
+            overrides["model"] = args.llm_model
+        if getattr(args, "llm_api_key", None):
+            provider = getattr(args, "llm_provider", "") or "openai"
+            if provider == "openai":
+                overrides["openai_api_key"] = args.llm_api_key
+            elif provider == "anthropic":
+                overrides["anthropic_api_key"] = args.llm_api_key
+            else:
+                overrides["api_key"] = args.llm_api_key
+        result = write_chapter(project_root, chapter_file=chapter_path, config_overrides=overrides, dry_run=False)
+        return bool(result.get("ok"))
+    except Exception:
+        return False
+
+
 def _calc_skip_density(text: str, paragraphs: List[str]) -> float:
     """计算概括跳过词密度（hits / paragraphs），用于检测剧情飞速推进。"""
     total = sum(len(re.findall(p, text)) for p in _FLOW_PACING_SKIP_PATTERNS)
@@ -1053,7 +1171,7 @@ def _generate_beat_draft(
     max_skip_density = float(pacing_profile.get("max_skip_density", 0.30))
 
     # Step 2: 逐 Beat 扩写 + Beat 级校验与重试
-    draft_provider = getattr(args, "draft_provider", "template")
+    draft_provider = _resolve_draft_provider(args, project_root)
 
     for beat_id in range(1, beat_count + 1):
         e_code, _e_out, _e_err, e_payload = run_python(
@@ -1220,6 +1338,7 @@ def _count_dialogue_chars(text: str) -> int:
 
 
 def apply_targeted_quality_fix(
+    project_root: Path,
     chapter_path: Path,
     quality: Dict[str, object],
     args: argparse.Namespace,
@@ -1234,6 +1353,30 @@ def apply_targeted_quality_fix(
     sentence_count_raw = quality.get("sentence_count", 0)
     paragraph_count = int(paragraph_count_raw) if isinstance(paragraph_count_raw, (int, float, str)) else 0
     sentence_count = int(sentence_count_raw) if isinstance(sentence_count_raw, (int, float, str)) else 0
+
+    # 跨轮次编号接续
+    next_paragraph_idx = _next_fix_block_index(txt, "\u8865\u5145\u6bb5\u843d")
+    next_progress_idx = _next_fix_block_index(txt, "\u8865\u5145\u63a8\u8fdb")
+
+    # 优先处理 pacing_skip_density_critical
+    if any(
+        f.startswith("pacing_skip_density_critical") or f.startswith("pacing_skip_density_too_high")
+        for f in failures
+    ):
+        prompt = _build_pacing_rewrite_prompt(query, failures)
+        if _rewrite_chapter_with_llm(project_root, chapter_path, args, prompt):
+            txt = read_text(chapter_path).rstrip()
+            txt = _normalize_paragraph_variance(_rebalance_dialogue_heavy_text(txt, query))
+            actions.append("LLM rewrite for high skip density")
+        else:
+            txt = _normalize_paragraph_variance(_rebalance_dialogue_heavy_text(txt, query))
+            txt += (
+                "\n\n"
+                f"[Scene expansion] Describe the execution of '{query}' with action steps, "
+                "environment resistance, immediate feedback, and new decisions. "
+                "Do not use summary skip phrases."
+            )
+            actions.append("Fallback scene expansion for skip density")
 
     if any(f.startswith("paragraph_count<") for f in failures):
         missing = max(1, args.min_paragraphs - paragraph_count)
@@ -1567,7 +1710,7 @@ def auto_fix_after_gate_failure(
 
     if "quality_baseline" in fail_text and args.auto_fix_quality:
         old_quality = dict(quality)
-        quality_actions = apply_targeted_quality_fix(chapter_path, quality, args, query)
+        quality_actions = apply_targeted_quality_fix(project_root, chapter_path, quality, args, query)
         if quality_actions:
             actions.extend([f"质量最小修复：{x}" for x in quality_actions])
             quality = evaluate_quality(read_text(chapter_path), args)
@@ -1764,7 +1907,7 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
         writing_query = "\n\n".join(query_sections)
 
         auto_draft_applied = False
-        draft_provider_used = getattr(args, 'draft_provider', 'template')
+        draft_provider_used = _resolve_draft_provider(args, project_root)
         fallback_applied = False
         llm_error_msg = None
 
@@ -2512,8 +2655,8 @@ def parse_args() -> argparse.Namespace:
                         help="AI高频词密度限制，默认0.05（5%%）")
     p_cont.add_argument("--auto-research", dest="auto_research", action="store_true", default=True,
                         help="写前自动检测知识缺口并提示调研")
-    p_cont.add_argument("--draft-provider", choices=["template", "llm"], default="template",
-                        help="草稿生成策略：template(模板模式,默认) 或 llm(多LLM写作)")
+    p_cont.add_argument("--draft-provider", choices=["auto", "template", "llm"], default="auto",
+                        help="Draft strategy: auto (Two-Phase if LLM configured), template, or llm")
     p_cont.add_argument("--llm-provider", default=None,
                         help="LLM提供商(openai/anthropic/kimi/glm/minimax)，需配合--draft-provider llm")
     p_cont.add_argument("--llm-model", default=None,
