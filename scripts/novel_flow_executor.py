@@ -220,7 +220,8 @@ def _decompose_beat_scenes(
 
         return scene_map
 
-    except Exception:
+    except Exception as _dbs_err:
+        print(f"[警告] 场景分解失败，降级到原始扩写提示词: {_dbs_err}")
         return None
 
 
@@ -999,13 +1000,29 @@ def _generate_beat_draft(
 
     pacing_depth = _resolve_pacing_mode(getattr(args, "pacing_mode", "standard"))
 
+    # 从 writing_constraints 提取大纲约束和事件推荐，丰富章节目标描述
+    # 使 beat 骨架 / 扩写 prompt 获得真实的剧情约束而非空泛目标
+    enriched_goal = chapter_goal
+    if writing_constraints:
+        parts: List[str] = [chapter_goal]
+        outline_c = writing_constraints.get("outline_constraints", "")
+        if outline_c:
+            parts.append(f"大纲约束：{str(outline_c)[:120]}")
+        event_rec = writing_constraints.get("event_recommendation", "")
+        if event_rec:
+            parts.append(f"推荐事件：{str(event_rec)[:120]}")
+        graph_ctx = writing_constraints.get("graph_context", "")
+        if graph_ctx:
+            parts.append(f"人物关系：{str(graph_ctx)[:100]}")
+        enriched_goal = " | ".join(p for p in parts if p)[:400]
+
     # Step 1: 生成 Beat Sheet 骨架
     b_code, _b_out, _b_err, b_payload = run_python(
         SCRIPT_DIR / "beat_sheet_generator.py",
         ["generate",
          "--project-root", str(project_root),
          "--chapter", str(chapter_no),
-         "--chapter-goal", chapter_goal,
+         "--chapter-goal", enriched_goal,
          "--pacing-depth", pacing_depth,
          "--beat-count", str(getattr(args, "beat_count", 4))],
     )
@@ -1149,7 +1166,8 @@ def _generate_beat_draft(
                     }
                     save_json(sheet_path, sheet, indent=2)
 
-            except Exception:
+            except Exception as _beat_err:
+                print(f"[警告] Beat {beat_id} LLM 写作异常，降级写入扩写提示词模板: {_beat_err}")
                 write_text(beat_file, expand_prompt)
         else:
             write_text(beat_file, expand_prompt)
@@ -1359,8 +1377,8 @@ def write_gate_artifacts(
                     )
                     if llm_result.get("ok"):
                         humanizer_auto_fixed = True
-                except Exception:
-                    pass
+                except Exception as _hum_err:
+                    print(f"[警告] Humanizer 自动修复失败: {_hum_err}")
             humanizer_rounds += 1
             # 重新检测，severity 已达 low 则退出循环
             re_code, _, _, re_payload = run_python(
