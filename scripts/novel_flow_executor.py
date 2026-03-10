@@ -132,6 +132,132 @@ def _build_retry_prompt(expand_prompt: str, retry: int, word_target: int) -> str
         "4. \u4e0d\u5f97\u51fa\u73b0\u4efb\u4f55\u7ed3\u8bba\u5148\u884c\u3001\u7701\u7565\u8fc7\u7a0b\u7684\u53d9\u8ff0\n\n"
     )
     return header + expand_prompt
+
+
+# ── 两阶段写作：场景分解 + 场景锚定提示词 ───────────────────────────────────
+
+_SCENE_DECOMPOSE_SYSTEM = (
+    "你是专业小说结构编辑。接收一个 beat（场景片段）的写作任务描述，"
+    "将其拆解为 5\u20137 个连续的「微时刻」，以 JSON 格式输出。"
+    "每个微时刻必须包含：action（具体动作，非总结）、sensory（感官细节）、"
+    "emotion（情绪/内心状态）、obstacle（遇到的阻力或变化，可为空字符串）。"
+    "输出格式严格为：```json\n"
+    "{\"moments\": [{\"id\":1,\"action\":\"\",\"sensory\":\"\",\"emotion\":\"\",\"obstacle\":\"\"}]}\n"
+    "```\n"
+    "禁止使用「经过一番」「很快」「此后」等概括跳过词描述微时刻。"
+)
+
+_SCENE_DECOMPOSE_USER_TMPL = (
+    "请将以下 beat 写作任务拆解为 5\u20137 个微时刻（JSON 格式）：\n\n"
+    "{beat_summary}\n\n"
+    "字数目标：约 {word_target} 字。每个微时刻对应约 {chars_per_moment} 字的散文。"
+)
+
+
+def _decompose_beat_scenes(
+    expand_prompt: str,
+    word_target: int,
+    overrides: Dict[str, object],
+    project_root: Path,
+) -> Optional[Dict[str, object]]:
+    """Phase 1：调用 LLM 将 beat 拆解为 5~7 个微时刻 JSON。
+
+    复用散文写作的 provider 配置，发出一次独立的场景分解请求。
+    成功返回 scene_map dict（含 moments 列表），失败返回 None（降级到原流程）。
+    """
+    import json as _json
+
+    beat_summary = expand_prompt[:600].strip()
+    moment_count = 6
+    chars_per_moment = max(80, word_target // moment_count)
+
+    user_msg = _SCENE_DECOMPOSE_USER_TMPL.format(
+        beat_summary=beat_summary,
+        word_target=word_target,
+        chars_per_moment=chars_per_moment,
+    )
+
+    try:
+        from novel_chapter_writer import write_chapter  # type: ignore[import]
+
+        tmp_file = project_root / "00_memory" / "beats" / "_scene_decompose_tmp.md"
+        decompose_overrides: Dict[str, object] = {
+            **overrides,  # type: ignore[misc]
+            "writing_prompt": user_msg,
+            "writing_system_prompt_override": _SCENE_DECOMPOSE_SYSTEM,
+            "max_tokens": 1200,
+            "humanizer_enabled": False,
+        }
+
+        result = write_chapter(
+            project_root,
+            chapter_file=tmp_file,
+            config_overrides=decompose_overrides,
+            dry_run=False,
+        )
+
+        if not result.get("ok"):
+            return None
+
+        raw = tmp_file.read_text(encoding="utf-8") if tmp_file.exists() else ""
+        tmp_file.unlink(missing_ok=True)
+
+        # 优先提取 ```json...``` 代码块，其次尝试裸 JSON
+        json_match = re.search(r"```json\s*(.*?)\s*```", raw, re.DOTALL)
+        if json_match:
+            scene_map: Dict[str, object] = _json.loads(json_match.group(1))
+        else:
+            bare = re.search(r'\{[^{}]*"moments"[^{}]*\[.*?\]\s*\}', raw, re.DOTALL)
+            if not bare:
+                return None
+            scene_map = _json.loads(bare.group(0))
+
+        moments = scene_map.get("moments", [])
+        if not isinstance(moments, list) or len(moments) < 3:
+            return None
+
+        return scene_map
+
+    except Exception:
+        return None
+
+
+def _build_scene_anchored_prompt(expand_prompt: str, scene_map: Dict[str, object]) -> str:
+    """Phase 2：将场景分解结果嵌入扩写提示词，锁定微时刻序列。
+
+    LLM 在 Phase 1 已承诺具体微时刻，Phase 2 只能按序展开，无法再概括跳过。
+    """
+    moments: List[Dict[str, object]] = scene_map.get("moments", [])  # type: ignore[assignment]
+    lines: List[str] = []
+    for m in moments:
+        idx = m.get("id", "?")
+        action = m.get("action", "")
+        sensory = m.get("sensory", "")
+        emotion = m.get("emotion", "")
+        obstacle = m.get("obstacle", "")
+        line = (
+            f"  \u300e\u5fae\u65f6\u523b{idx}\u300f"
+            f"\u52a8\u4f5c\uff1a{action}"
+            f"\uff5c\u611f\u5b98\uff1a{sensory}"
+            f"\uff5c\u60c5\u7eea\uff1a{emotion}"
+        )
+        if obstacle:
+            line += f"\uff5c\u963b\u529b\uff1a{obstacle}"
+        lines.append(line)
+
+    moments_text = "\n".join(lines)
+    n = len(moments)
+    header = (
+        f"\u3010\u573a\u666f\u5206\u89e3\u9501\u5b9a\u3011\u4ee5\u4e0b {n} \u4e2a\u5fae\u65f6\u523b\u5df2\u786e\u5b9a\uff0c"
+        "\u5fc5\u987b\u6309\u987a\u5e8f\u5c55\u5f00\u6bcf\u4e2a\u5fae\u65f6\u523b\u7684\u6563\u6587\uff0c"
+        "\u6bcf\u4e2a\u5fae\u65f6\u523b\u81f3\u5c11\u5199 3 \u6bb5\uff08\u52a8\u4f5c\u2192\u611f\u5b98\u2192\u60c5\u7eea\uff09\uff0c"
+        "\u7981\u6b62\u5408\u5e76\u3001\u8df3\u8fc7\u6216\u91cd\u6392\u4efb\u4f55\u5fae\u65f6\u523b\u3002\n\n"
+        f"\u5fae\u65f6\u523b\u5e8f\u5217\uff1a\n{moments_text}\n\n"
+        "\u73b0\u5728\u5f00\u59cb\u7ed9\u6bcf\u4e2a\u5fae\u65f6\u523b\u5199\u8be6\u7ec6\u7684\u5c0f\u8bf4\u6563\u6587\uff1a\n\n"
+    )
+    return header + expand_prompt
+
+
 def run_python(script: Path, args: List[str]) -> Tuple[int, str, str, Optional[Dict[str, object]]]:
     cmd = [sys.executable, str(script), *args]
     env = os.environ.copy()
@@ -930,6 +1056,20 @@ def _generate_beat_draft(
                 if getattr(args, "llm_api_key", None):
                     overrides["api_key"] = args.llm_api_key
 
+                # ── Phase 1：场景分解（Two-Phase Writing）────────────────────
+                # 调用 LLM 将 beat 预先拆解为 5~7 个微时刻，强迫模型承诺
+                # 具体瞬间（action/sensory/emotion/obstacle），使后续写作
+                # 无法通过概括跳过来压缩内容。分解失败时降级到原流程。
+                scene_map = _decompose_beat_scenes(
+                    expand_prompt, word_target, overrides, project_root
+                )
+                # 用场景锚定提示词替换原始扩写提示词（Phase 2 基础提示词）
+                base_prompt = (
+                    _build_scene_anchored_prompt(expand_prompt, scene_map)
+                    if scene_map is not None
+                    else expand_prompt
+                )
+
                 # Beat 级校验与重试循环（最多 3 次尝试，失败降级接受继续下一 beat）
                 attempt_results: List[Dict[str, object]] = []
                 accepted = False
@@ -937,8 +1077,8 @@ def _generate_beat_draft(
 
                 for attempt in range(3):
                     current_prompt = (
-                        expand_prompt if attempt == 0
-                        else _build_retry_prompt(expand_prompt, attempt, word_target)
+                        base_prompt if attempt == 0
+                        else _build_retry_prompt(base_prompt, attempt, word_target)
                     )
                     overrides["writing_prompt"] = current_prompt
 

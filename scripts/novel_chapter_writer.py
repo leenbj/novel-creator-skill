@@ -742,20 +742,42 @@ class AnthropicProvider(AIProvider):
         self.model = config.get('model', 'claude-3-sonnet-20240229')
         self.temperature = config.get('temperature', 0.8)
         self.max_tokens = config.get('max_tokens', 4000)
-    
+        # extended_thinking：开启后 Claude 在写作前内部规划场景结构，
+        # 显著减少概括跳过。注意：开启时会自动忽略 temperature 参数。
+        self.extended_thinking: bool = bool(config.get('extended_thinking', False))
+        self.thinking_budget: int = int(config.get('thinking_budget_tokens', 3000))
+
     def generate(self, system_prompt: str, user_prompt: str) -> str:
-        """调用Claude API生成内容"""
+        """调用 Claude API 生成内容。
+
+        当 extended_thinking=True 时启用深度推理模式：Claude 会在内部规划
+        场景结构、微时刻分布、情绪节奏后再输出散文，天然防止概括跳过。
+        Extended thinking 与 temperature 不兼容，启用时自动移除 temperature。
+        """
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                system=system_prompt,
-                messages=[
-                    {"role": "user", "content": user_prompt}
-                ]
-            )
-            return response.content[0].text
+            if self.extended_thinking:
+                # extended thinking 不兼容 temperature，必须省略该参数
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    thinking={
+                        "type": "enabled",
+                        "budget_tokens": self.thinking_budget,
+                    },
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+            else:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+            # 只取 text 类型的块（thinking 块不包含在输出正文中）
+            text_blocks = [b.text for b in response.content if b.type == "text"]
+            return "\n".join(text_blocks)
         except Exception as e:
             raise RuntimeError(f"Anthropic API调用失败: {e}")
 
