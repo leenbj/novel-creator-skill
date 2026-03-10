@@ -222,5 +222,121 @@ class TestNovelFlowExecutor(unittest.TestCase):
         self.assertTrue(any("质量最小修复" in x for x in actions))
 
 
+class TestPacingAndGateFixes(unittest.TestCase):
+    """P1-3/P1-4/P0-2 修复专项测试。"""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="novel_pacing_test_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _init_project(self):
+        run_cmd([
+            "one-click", "--project-root", str(self.tmpdir),
+            "--title", "修复测试", "--genre", "悬疑", "--idea", "测试用例",
+        ])
+
+    def test_evaluate_quality_standard_high_skip_density_fails(self):
+        """standard 模式极高概括跳过密度（>0.5）应升级为硬失败。"""
+        import sys
+        sys.path.insert(0, str(ROOT))
+        import importlib
+        nfe = importlib.import_module("novel_flow_executor")
+        import argparse
+
+        # 构造一段极高概括跳过密度的文本（几乎全是跳过句）
+        skip_heavy = (
+            "经过一番苦修，终于练功大成。\n\n"
+            "此后数日，没过多久便突破瓶颈。\n\n"
+            "转眼间，一切都完成了。\n\n"
+            "随后又经过一番历练，很快就完成了任务。\n\n"
+            "苦修数月，不知不觉就成功了。\n\n"
+        ) * 20  # 重复 20 次保证字数
+
+        args = argparse.Namespace(
+            min_chars=100,
+            min_paragraphs=2,
+            min_dialogue_ratio=0.0,
+            max_dialogue_ratio=1.0,
+            min_sentences=1,
+            pacing_mode="standard",
+        )
+        result = nfe.evaluate_quality(skip_heavy, args)
+        failures = result.get("failures", [])
+        self.assertTrue(
+            any("pacing_skip_density_critical" in f for f in failures),
+            f"standard 模式极高 skip density 应硬失败，实际 failures={failures}",
+        )
+
+    def test_evaluate_quality_immersive_skip_density_fails(self):
+        """immersive 模式概括跳过密度超阈值应硬失败。"""
+        import sys
+        sys.path.insert(0, str(ROOT))
+        import importlib
+        nfe = importlib.import_module("novel_flow_executor")
+        import argparse
+
+        skip_text = ("经过一番苦修练功大成。\n\n此后便突破了瓶颈。\n\n" ) * 30
+
+        args = argparse.Namespace(
+            min_chars=100, min_paragraphs=2,
+            min_dialogue_ratio=0.0, max_dialogue_ratio=1.0,
+            min_sentences=1, pacing_mode="immersive",
+        )
+        result = nfe.evaluate_quality(skip_text, args)
+        failures = result.get("failures", [])
+        self.assertTrue(
+            any("pacing_skip_density_too_high" in f for f in failures),
+            f"immersive 模式 skip density 应硬失败，实际 failures={failures}",
+        )
+
+    def test_publish_ready_reflects_quality_failure(self):
+        """质量未通过时，publish_ready.md 应写入 FAIL 关键词，而非 PASS。"""
+        import sys
+        sys.path.insert(0, str(ROOT))
+        import importlib
+        nfe = importlib.import_module("novel_flow_executor")
+
+        self._init_project()
+        chapter_files = list((self.tmpdir / "03_manuscript").glob("第*章*.md"))
+        self.assertTrue(chapter_files, "初始化应创建章节文件")
+        chapter_path = chapter_files[0]
+
+        fake_quality: dict = {
+            "ok": False,
+            "char_count": 100,
+            "paragraph_count": 2,
+            "dialogue_ratio": 0.05,
+            "ai_phrase_hits": [],
+            "failures": ["char_count<2500 (current: 100)"],
+        }
+        nfe.write_gate_artifacts(self.tmpdir, chapter_path, "测试查询", fake_quality, None)
+
+        publish_path = (
+            self.tmpdir / "04_editing" / "gate_artifacts"
+            / nfe.slugify(chapter_path.stem) / "publish_ready.md"
+        )
+        self.assertTrue(publish_path.exists(), "publish_ready.md 应被写入")
+        content = publish_path.read_text(encoding="utf-8")
+        self.assertIn("FAIL", content, "质量不达标时 publish_ready.md 应含 FAIL 关键词")
+        self.assertNotIn("PASS", content, "质量不达标时 publish_ready.md 不应含 PASS")
+
+    def test_decompose_overrides_disable_memory_update(self):
+        """_decompose_beat_scenes 的 config_overrides 必须包含 auto_update_memory=False。"""
+        import sys
+        sys.path.insert(0, str(ROOT))
+        import importlib
+        nfe = importlib.import_module("novel_flow_executor")
+        import inspect, textwrap
+
+        src = inspect.getsource(nfe._decompose_beat_scenes)
+        self.assertIn(
+            "auto_update_memory",
+            src,
+            "_decompose_beat_scenes 必须在 decompose_overrides 中包含 auto_update_memory",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

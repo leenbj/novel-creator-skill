@@ -787,18 +787,28 @@ def evaluate_quality(text: str, args: argparse.Namespace) -> Dict[str, object]:
             f"max_duplicate_paragraph_repeat>{max_dup_repeat} (current: {max_duplicate_paragraph_repeat})"
         )
 
-    # 概括跳过密度检查（immersive 模式为硬失败，其他模式仅记录）
+    # 概括跳过密度检查
+    # immersive 模式：超阈值为硬失败
+    # standard 模式：超阈值 0.5（极高）也升为硬失败，低于 0.5 仅记录警告
+    # fast 模式：仅记录，不阻断
     pacing_mode_val = _resolve_pacing_mode(getattr(args, "pacing_mode", "standard"))
     pacing_p = PACING_MODE_PROFILES[pacing_mode_val]
     para_list = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
     skip_density = _calc_skip_density(body, para_list)
     max_skip = float(pacing_p.get("max_skip_density", 0.30))
     skip_density_exceeded = skip_density > max_skip
-    if skip_density_exceeded and pacing_mode_val == "immersive":
-        failures.append(
-            f"pacing_skip_density_too_high ({skip_density:.2f}/para, max: {max_skip:.2f}) "
-            f"— 检测到概括跳过叙述，immersive 模式须展开每个场景过程"
-        )
+    _STANDARD_HARD_SKIP_THRESHOLD = 0.50  # standard 模式极高密度升级为硬失败
+    if skip_density_exceeded:
+        if pacing_mode_val == "immersive":
+            failures.append(
+                f"pacing_skip_density_too_high ({skip_density:.2f}/para, max: {max_skip:.2f}) "
+                f"— 检测到概括跳过叙述，immersive 模式须展开每个场景过程"
+            )
+        elif pacing_mode_val == "standard" and skip_density > _STANDARD_HARD_SKIP_THRESHOLD:
+            failures.append(
+                f"pacing_skip_density_critical ({skip_density:.2f}/para, hard_limit: {_STANDARD_HARD_SKIP_THRESHOLD:.2f}) "
+                f"— 概括跳过密度极高，standard 模式亦不可接受，需展开场景"
+            )
 
     return {
         "char_count": char_count,
@@ -1411,12 +1421,25 @@ def write_gate_artifacts(
 - 发布建议：参考下方检测报告后执行两遍式润色
 {humanizer_section}
 """
+    quality_ok: bool = bool(quality.get("ok", False))
+    quality_failures: List[str] = list(quality.get("failures", []))  # type: ignore[arg-type]
+    if quality_ok:
+        publish_verdict = "可发布（通过）"
+        publish_keyword = "可发布 / 通过 / PASS"
+        publish_note = "本章已完成自动流程并通过所有质量门禁项。"
+    else:
+        publish_verdict = "不建议发布（未通过）"
+        publish_keyword = "不通过 / FAIL"
+        failure_lines = "\n".join(f"  - {f}" for f in quality_failures) if quality_failures else "  - 未知失败"
+        publish_note = f"本章未通过以下质量门禁项，需修复后重新检查：\n{failure_lines}"
+
     publish = f"""# 发布判定
 
 章节：{chapter_path.name}
-结论：可发布（通过）
-说明：本章已完成自动流程并通过基础门禁项。
-关键词：可发布 / 通过 / PASS
+结论：{publish_verdict}
+说明：{publish_note}
+字符数：{quality.get('char_count', 0)}  段落数：{quality.get('paragraph_count', 0)}
+关键词：{publish_keyword}
 """
 
     paths = [
@@ -1792,8 +1815,33 @@ def continue_write(args: argparse.Namespace) -> Dict[str, object]:
                     draft_provider_used = "template"
                     fallback_applied = True
                     auto_draft_applied = True
+            elif draft_provider_used == "beat_sheet_template":
+                # beat_sheet_template 模式：beat 合成已产出结构化写作指引（BEAT_SHEET_STUB），
+                # 用 beat sheet JSON 中的 chapter_goal 和各 beat 摘要构造富语义 query，
+                # 生成比纯泛型模板更贴合剧情的草稿，保留 beat 结构信息。
+                beat_sheet_json = load_json(
+                    project_root / "00_memory" / "beats"
+                    / f"ch{chapter_no_from_name(chapter_path.name):04d}_beat_sheet.json",
+                    default={},
+                )
+                beat_goal = beat_sheet_json.get("chapter_goal", "") or query
+                beat_summaries = [
+                    str(b.get("summary", ""))
+                    for b in beat_sheet_json.get("beats", [])
+                    if isinstance(b, dict) and b.get("summary") and "[待填充]" not in str(b.get("summary", ""))
+                ]
+                enriched_beat_query = beat_goal
+                if beat_summaries:
+                    enriched_beat_query += "；" + "、".join(beat_summaries[:4])
+                draft = generate_draft_text(
+                    project_root, chapter_path,
+                    enriched_beat_query[:300],
+                    min_chars=args.min_chars,
+                )
+                write_text(chapter_path, draft)
+                auto_draft_applied = True
             else:
-                # template 模式
+                # 纯 template 模式
                 draft = generate_draft_text(project_root, chapter_path, query, min_chars=args.min_chars)
                 write_text(chapter_path, draft)
                 auto_draft_applied = True
