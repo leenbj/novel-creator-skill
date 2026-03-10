@@ -266,10 +266,26 @@ def cmd_expand(args: argparse.Namespace, cfg: BeatConfig) -> Dict[str, Any]:
     pacing_depth = raw_pd if raw_pd in PACING_PROFILES else "standard"
     pacing_directive = PACING_PROFILES[pacing_depth]["directive"]
 
-    prompt_lines = [
-        f"## Beat {beat_id} 扩写指令（{beat_type_cn}）",
-        "",
-        f"**场景概要**: {target_beat.get('summary', '')}",
+    # 当 summary 仍为占位符时，用章节目标推导上下文，确保 LLM 获得实质信息
+    chapter_goal = sheet.get("chapter_goal", "")
+    beat_total = len(sheet.get("beats", [])) or 1
+    beat_summary = target_beat.get("summary", "")
+    if not beat_summary or "[待填充]" in beat_summary:
+        beat_summary = (
+            f"（自动生成）本章目标：{chapter_goal} | "
+            f"当前为第 {beat_id}/{beat_total} 个 Beat（{beat_type_cn}类型），"
+            f"请根据章节目标和 Beat 类型展开合理的场景"
+        )
+
+    # 构建 prompt，过滤空行避免生成冗余空白
+    _meta_lines = [f"**本章目标**: {chapter_goal}"] if chapter_goal else []
+    _meta_lines += [f"**Beat 进度**: {beat_id} / {beat_total}"]
+    prompt_lines = (
+        [f"## Beat {beat_id} 扩写指令（{beat_type_cn}）", ""]
+        + _meta_lines
+        + [f"**场景概要**: {beat_summary}"]
+    )
+    prompt_lines += [
         f"**出场角色**: {characters}",
         f"**地点**: {location}",
         f"**微冲突**: {target_beat.get('micro_conflict', '待定')}",

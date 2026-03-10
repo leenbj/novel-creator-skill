@@ -187,6 +187,8 @@ def _decompose_beat_scenes(
             "writing_system_prompt_override": _SCENE_DECOMPOSE_SYSTEM,
             "max_tokens": 1200,
             "humanizer_enabled": False,
+            # 场景分解是中间任务，禁止触发记忆更新，避免污染项目记忆
+            "auto_update_memory": False,
         }
 
         result = write_chapter(
@@ -1054,7 +1056,14 @@ def _generate_beat_draft(
                 if getattr(args, "llm_model", None):
                     overrides["model"] = args.llm_model
                 if getattr(args, "llm_api_key", None):
-                    overrides["api_key"] = args.llm_api_key
+                    # 按 provider 使用正确的 key 名，避免静默退化到环境变量兜底
+                    _llm_prov = getattr(args, "llm_provider", "") or ""
+                    if _llm_prov == "openai":
+                        overrides["openai_api_key"] = args.llm_api_key
+                    elif _llm_prov == "anthropic":
+                        overrides["anthropic_api_key"] = args.llm_api_key
+                    else:
+                        overrides["api_key"] = args.llm_api_key
 
                 # ── Phase 1：场景分解（Two-Phase Writing）────────────────────
                 # 调用 LLM 将 beat 预先拆解为 5~7 个微时刻，强迫模型承诺
