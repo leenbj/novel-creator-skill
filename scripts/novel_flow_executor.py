@@ -85,8 +85,16 @@ def _resolve_pacing_mode(value: Optional[str]) -> str:
 
 
 
+# 环境变量：标记当前是否在 Claude Code / Codex 等 CLI 工具中运行
+# 设置此变量后，系统将使用 MCP Codex 工具进行写作，无需外部 API Key
+_CLAUDE_CODE_MODE = os.environ.get("CLAUDE_CODE_MODE", "") or os.environ.get("CODEX_MODE", "")
+
+
 def _has_llm_config(args: argparse.Namespace, project_root: Path) -> bool:
     """Check if LLM configuration is available for writing."""
+    # 优先检查是否在 Claude Code / Codex 模式下
+    if _CLAUDE_CODE_MODE:
+        return True
     if getattr(args, "llm_provider", None) or getattr(args, "llm_api_key", None):
         return True
     if os.environ.get("NOVEL_LLM_PROVIDER") or os.environ.get("NOVEL_AI_PROVIDER"):
@@ -99,6 +107,9 @@ def _resolve_draft_provider(args: argparse.Namespace, project_root: Path) -> str
     raw = str(getattr(args, "draft_provider", "auto") or "auto")
     if raw in {"template", "llm"}:
         return raw
+    # Claude Code 模式下默认使用 llm（通过 MCP Codex）
+    if _CLAUDE_CODE_MODE:
+        return "llm"
     return "llm" if _has_llm_config(args, project_root) else "template"
 
 
@@ -172,6 +183,37 @@ def _build_pacing_rewrite_prompt(query: str, failures: List[str]) -> str:
     )
 
 
+def _write_with_mcp_codex(
+    project_root: Path,
+    chapter_path: Path,
+    prompt: str,
+) -> bool:
+    """Write chapter using MCP Codex tool (Claude Code integration).
+
+    This function is called when CLAUDE_CODE_MODE is enabled, allowing
+    the system to use the current Claude Code session for writing without
+    requiring external API keys.
+
+    Returns True on success.
+    """
+    # This is a placeholder that signals the orchestrator to use MCP Codex
+    # The actual MCP call is handled by the calling code (Claude Code agent)
+    # We write a signal file that the agent can detect and respond to
+    signal_file = project_root / ".flow" / "mcp_write_request.json"
+    ensure_dir(signal_file.parent)
+
+    signal_data = {
+        "chapter_path": str(chapter_path),
+        "prompt": prompt,
+        "timestamp": dt.datetime.now().isoformat(),
+    }
+    write_json(signal_file, signal_data)
+
+    # Return False to indicate this needs to be handled by the caller
+    # The actual MCP Codex call will be made by the Claude Code agent
+    return False
+
+
 def _rewrite_chapter_with_llm(
     project_root: Path,
     chapter_path: Path,
@@ -181,6 +223,10 @@ def _rewrite_chapter_with_llm(
     """Rewrite chapter using LLM for pacing issues. Returns True on success."""
     if not _has_llm_config(args, project_root):
         return False
+
+    # Claude Code 模式：使用 MCP Codex
+    if _CLAUDE_CODE_MODE:
+        return _write_with_mcp_codex(project_root, chapter_path, prompt)
     try:
         from novel_chapter_writer import write_chapter  # type: ignore[import]
         overrides: Dict[str, object] = {"writing_prompt": prompt}
